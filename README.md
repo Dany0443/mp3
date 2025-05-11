@@ -14,8 +14,8 @@ A modern, feature-rich application for downloading YouTube videos as high-qualit
 
 1. Clone this repository:
    ```
-   git clone https://github.com/yourusername/mp3downloader.git
-   cd mp3downloader
+   git clone https://github.com/Dany0443/mp3r.git
+   cd mp3
    ```
 
 2. Install dependencies:
