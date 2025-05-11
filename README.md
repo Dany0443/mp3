@@ -4,7 +4,7 @@ A modern, feature-rich application for downloading YouTube videos as high-qualit
 
 ## Features
 
-- Download MP3 audio from any YouTube video
+- Download MP3, WAV, OGG audio from any YouTube video
 - Multiple audio quality options (320kbps, 256kbps, 192kbps, 128kbps)
 - Customizable filename formats
 - Real-time download progress tracking
