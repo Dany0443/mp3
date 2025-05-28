@@ -14,7 +14,7 @@ A modern, feature-rich application for downloading YouTube videos as high-qualit
 
 1. Clone this repository:
    ```
-   git clone https://github.com/Dany0443/mp3r.git
+   git clone https://github.com/Dany0443/mp3.git
    cd mp3
    ```
 
