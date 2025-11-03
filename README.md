@@ -1,3 +1,5 @@
+## this project is not updated, it may not work
+
 # YouTube MP3 Downloader
 
 A modern, feature-rich application for downloading YouTube videos as high-quality MP3 files. This application provides a sleek user interface with advanced options for audio quality and filename customization.
@@ -62,3 +64,4 @@ MIT
 ## Disclaimer
 
 This application is for personal use only. Please respect copyright laws and YouTube's terms of service when downloading content.
+
