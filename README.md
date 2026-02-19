@@ -1,71 +1,45 @@
-## this project is not updated, it may not work
+# FastMP3
 
-### u can find a working activly maintined version of it at [WJT](https://webjuniors.team/dashboard/mp3)
+Convert YouTube videos and playlists to audio files from your browser.
 
-
-# YouTube MP3 Downloader
-
-A modern, feature-rich application for downloading YouTube videos as high-quality MP3 files. This application provides a sleek user interface with advanced options for audio quality and filename customization.
+---
 
 ## Features
 
-- Download MP3, WAV, OGG audio from any YouTube video
-- Multiple audio quality options (320kbps, 256kbps, 192kbps, 128kbps)
-- Customizable filename formats
-- Real-time download progress tracking
-- Responsive design for desktop and mobile devices
-
-## Installation
-
-1. Clone this repository:
-   ```
-   git clone https://github.com/Dany0443/mp3.git
-   cd mp3
-   ```
-
-2. Install dependencies:
-   ```
-   npm install
-   ```
-
-3. Start the server:
-   ```
-   npm start
-   ```
-
-4. Open your browser and navigate to:
-   ```
-   http://localhost:3000
-   ```
-
-## Usage
-
-1. Paste a YouTube URL into the input field
-2. Click "Fetch Video Info" to load the video details
-3. Select your preferred audio quality (320kbps, 256kbps, etc.)
-4. Choose a title format or create a custom format
-5. Click "Download MP3" to start the download process
-6. The file will automatically download when complete
+- Download as MP3, M4A, OGG, or WAV up to 320 kbps
+- Playlist support with ZIP output
+- Batch download multiple URLs at once
+- 30-second audio preview before downloading
+- ID3 metadata editor
+- Download history stored locally in the browser
+- Auto-cleans video titles for filenames
+- File size estimates per format and quality
+- PWA — installable, works as a mobile share target
 
 ## Requirements
 
-- Node.js (v14 or higher recommended)
-- FFmpeg (automatically installed via ffmpeg-static package)
-- Modern web browser with EventSource support
+- [Node.js](https://nodejs.org) 18+
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp)
+- [ffmpeg](https://ffmpeg.org)
 
-## Technical Details
+## Setup
 
-- Frontend: HTML5, CSS3, JavaScript
-- Backend: Node.js with Express
-- YouTube data extraction: ytdl-core
-- Audio processing: fluent-ffmpeg
+```bash
+git clone https://github.com/yourusername/fastmp3
+cd fastmp3
+npm install
+node server.js
+```
+
+Open `http://localhost:3556` in your browser.
+
+## Notes
+
+- For personal use only. Respect copyright laws.
+- Files expire from the server after 1 hour.
+- Download history is saved only in your browser's local storage.
+- If downloads fail with a 403, run `yt-dlp -U` to update.
 
 ## License
 
 MIT
-
-## Disclaimer
-
-This application is for personal use only. Please respect copyright laws and YouTube's terms of service when downloading content.
-
-
