@@ -1,0 +1,28 @@
+{
+  "name": "fastmp3",
+  "version": "1.0.0",
+  "description": "YouTube audio downloader",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@fastify/cors": "8.5.0",
+    "axios": "^1.13.5",
+    "bgutils-js": "^3.2.0",
+    "commander": "^14.0.3",
+    "express": "^5.2.1",
+    "fastify": "4.29.1",
+    "jsdom": "^28.1.0",
+    "proxy-agent": "^6.5.0",
+    "uuid": "^9.0.1",
+    "youtubei.js": "^16.0.1"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.0",
+    "typescript": "^5.9.3"
+  }
+}

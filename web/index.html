@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>FastMP3</title>
+    <link rel="icon" type="image/x-icon" href="favicon.ico">
+    <link rel="manifest" href="./manifest.json">
+    <meta name="theme-color" content="#0a0a0a">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <link rel="stylesheet" href="./style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700;800&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script>
+        // Apply saved theme before page renders to prevent flash
+        if (localStorage.getItem('theme') === 'light') {
+            document.documentElement.classList.add('light-mode-pre');
+        }
+    </script>
+</head>
+<body>
+    <div class="bg-grid"></div>
+    <div class="bg-glow"></div>
+
+    <!-- Navbar -->
+    <header>
+        <div class="logo">
+            <div class="logo-icon"><i class="fas fa-waveform-lines"></i></div>
+            <span class="logo-text">FastMP3</span>
+        </div>
+
+        <div class="header-right">
+            <div class="panel-btns">
+                <button class="panel-trigger-btn" id="openPreview" title="Audio Preview">
+                    <i class="fas fa-play"></i>
+                </button>
+                <button class="panel-trigger-btn" id="openHistory" title="Download History">
+                    <i class="fas fa-clock-rotate-left"></i>
+                    <span class="history-badge hidden" id="historyBadge">0</span>
+                </button>
+                <button class="panel-trigger-btn" id="openMetadata" title="Edit Metadata / ID3 Tags">
+                    <i class="fas fa-tag"></i>
+                </button>
+                <button class="panel-trigger-btn" id="openBatch" title="Batch Download">
+                    <i class="fas fa-layer-group"></i>
+                </button>
+            </div>
+            <div class="theme-toggle-wrap">
+                <label class="switch" title="Toggle light/dark mode">
+                    <input class="input" type="checkbox" id="themeToggle">
+                    <div class="slider">
+                        <div class="sun">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+                                <g fill="#ffd43b">
+                                    <circle r="5" cy="12" cx="12"/>
+                                    <path d="m21 13h-1a1 1 0 0 1 0-2h1a1 1 0 0 1 0 2zm-17 0h-1a1 1 0 0 1 0-2h1a1 1 0 0 1 0 2zm13.66-5.66a1 1 0 0 1-.66-.29 1 1 0 0 1 0-1.41l.71-.71a1 1 0 1 1 1.41 1.41l-.71.71a1 1 0 0 1-.75.29zm-12.02 12.02a1 1 0 0 1-.71-.29 1 1 0 0 1 0-1.41l.71-.66a1 1 0 0 1 1.41 1.41l-.71.71a1 1 0 0 1-.7.24zm6.36-14.36a1 1 0 0 1-1-1v-1a1 1 0 0 1 2 0v1a1 1 0 0 1-1 1zm0 17a1 1 0 0 1-1-1v-1a1 1 0 0 1 2 0v1a1 1 0 0 1-1 1zm-5.66-14.66a1 1 0 0 1-.7-.29l-.71-.71a1 1 0 0 1 1.41-1.41l.71.71a1 1 0 0 1 0 1.41 1 1 0 0 1-.71.29zm12.02 12.02a1 1 0 0 1-.7-.29l-.66-.71a1 1 0 0 1 1.36-1.36l.71.71a1 1 0 0 1 0 1.41 1 1 0 0 1-.71.24z"/>
+                                </g>
+                            </svg>
+                        </div>
+                        <div class="moon">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512">
+                                <path d="m223.5 32c-123.5 0-223.5 100.3-223.5 224s100 224 223.5 224c60.6 0 115.5-24.2 155.8-63.4 5-4.9 6.3-12.5 3.1-18.7s-10.1-9.7-17-8.5c-9.8 1.7-19.8 2.6-30.1 2.6-96.9 0-175.5-78.8-175.5-176 0-65.8 36-123.1 89.3-153.3 6.1-3.5 9.2-10.5 7.7-17.3s-7.3-11.9-14.3-12.2c-6.3-.3-12.6-.4-19-.4z"/>
+                            </svg>
+                        </div>
+                    </div>
+                </label>
+            </div>
+        </div>
+    </header>
+
+    <!-- Drag & Drop Overlay -->
+    <div id="dragOverlay" class="drag-overlay hidden">
+        <div class="drag-overlay-inner">
+            <i class="fab fa-youtube"></i>
+            <p>Drop YouTube link here</p>
+        </div>
+    </div>
+
+    <!-- ── PANEL: Audio Preview ─────────────────────────────────── -->
+    <div class="panel-backdrop hidden" id="previewBackdrop"></div>
+    <div class="floating-panel hidden" id="previewPanel">
+        <div class="panel-header">
+            <div class="panel-title"><i class="fas fa-waveform-lines"></i> Audio Preview</div>
+            <button class="panel-close" id="closePreview"><i class="fas fa-xmark"></i></button>
+        </div>
+        <div class="panel-body">
+            <p class="panel-hint">Fetch a video first, then preview 30 seconds before downloading.</p>
+            <div id="previewVideoInfo" class="preview-video-info hidden">
+                <img id="previewThumb" src="" alt="">
+                <div>
+                    <p id="previewTitle" class="preview-title"></p>
+                    <p id="previewAuthor" class="preview-author"></p>
+                </div>
+            </div>
+            <button id="previewPlayBtn" class="preview-play-btn" disabled>
+                <i class="fas fa-play"></i> Preview 30s
+            </button>
+            <div id="previewPlayerWrap" class="preview-player-wrap hidden">
+                <audio id="previewAudio" controls></audio>
+                <canvas id="waveformCanvas" class="waveform-canvas"></canvas>
+                <p class="preview-quality-note" id="previewQualityNote"></p>
+            </div>
+        </div>
+    </div>
+
+    <!-- ── PANEL: Download History ─────────────────────────────── -->
+    <div class="panel-backdrop hidden" id="historyBackdrop"></div>
+    <div class="floating-panel hidden" id="historyPanel">
+        <div class="panel-header">
+            <div class="panel-title"><i class="fas fa-clock-rotate-left"></i> Download History</div>
+            <div class="panel-header-actions">
+                <button class="panel-action-btn" id="clearHistoryBtn" title="Clear all history"><i class="fas fa-trash"></i></button>
+                <button class="panel-close" id="closeHistory"><i class="fas fa-xmark"></i></button>
+            </div>
+        </div>
+        <div class="panel-body">
+            <div class="history-disclaimer">
+                <i class="fas fa-circle-info"></i>
+                History is saved only in this browser's local storage — nothing is sent to any server.
+            </div>
+            <div id="historyEmpty" class="panel-empty">
+                <i class="fas fa-clock-rotate-left"></i>
+                <p>No downloads yet</p>
+            </div>
+            <div id="historyList" class="history-list"></div>
+        </div>
+    </div>
+
+    <!-- ── PANEL: Metadata Editor ──────────────────────────────── -->
+    <div class="panel-backdrop hidden" id="metaBackdrop"></div>
+    <div class="floating-panel hidden" id="metaPanel">
+        <div class="panel-header">
+            <div class="panel-title"><i class="fas fa-tag"></i> ID3 Metadata</div>
+            <button class="panel-close" id="closeMeta"><i class="fas fa-xmark"></i></button>
+        </div>
+        <div class="panel-body">
+            <p class="panel-hint">Edit tags embedded into the file before downloading.</p>
+            <div class="meta-fields">
+                <div class="meta-field">
+                    <label class="opt-label">Title</label>
+                    <input type="text" id="metaTitle" placeholder="Track title">
+                </div>
+                <div class="meta-field">
+                    <label class="opt-label">Artist</label>
+                    <input type="text" id="metaArtist" placeholder="Artist name">
+                </div>
+                <div class="meta-field">
+                    <label class="opt-label">Album</label>
+                    <input type="text" id="metaAlbum" placeholder="Album name">
+                </div>
+                <div class="meta-row-2">
+                    <div class="meta-field">
+                        <label class="opt-label">Year</label>
+                        <input type="text" id="metaYear" placeholder="2024" maxlength="4">
+                    </div>
+                    <div class="meta-field">
+                        <label class="opt-label">Genre</label>
+                        <input type="text" id="metaGenre" placeholder="e.g. Electronic">
+                    </div>
+                </div>
+                <div class="meta-field">
+                    <label class="opt-label">Track #</label>
+                    <input type="text" id="metaTrack" placeholder="e.g. 1" maxlength="4">
+                </div>
+            </div>
+            <div class="meta-actions">
+                <button class="meta-clear-btn" id="metaClearBtn"><i class="fas fa-rotate-left"></i> Reset</button>
+                <button class="meta-save-btn" id="metaSaveBtn"><i class="fas fa-check"></i> Apply Tags</button>
+            </div>
+            <div id="metaSavedMsg" class="meta-saved-msg hidden"><i class="fas fa-check-circle"></i> Tags will be embedded on download</div>
+        </div>
+    </div>
+
+    <!-- ── PANEL: Batch Download ───────────────────────────────── -->
+    <div class="panel-backdrop hidden" id="batchBackdrop"></div>
+    <div class="floating-panel hidden" id="batchPanel">
+        <div class="panel-header">
+            <div class="panel-title"><i class="fas fa-layer-group"></i> Batch Download</div>
+            <button class="panel-close" id="closeBatch"><i class="fas fa-xmark"></i></button>
+        </div>
+        <div class="panel-body">
+            <p class="panel-hint">Paste multiple YouTube URLs — one per line. All will be queued and zipped together.</p>
+            <textarea id="batchUrls" class="batch-textarea" placeholder="https://youtube.com/watch?v=...&#10;https://youtube.com/watch?v=...&#10;https://youtube.com/watch?v=..."></textarea>
+            <div class="batch-options">
+                <div class="batch-opt-row">
+                    <span class="opt-label" style="margin:0">Format</span>
+                    <div class="custom-dropdown" id="batchFormatDropdown">
+                        <div class="dropdown-selected" style="height:38px">
+                            <span>MP3</span>
+                            <i class="fas fa-chevron-down chev"></i>
+                        </div>
+                        <div class="dropdown-options">
+                            <div data-value="mp3" class="selected">MP3</div>
+                            <div data-value="m4a">M4A</div>
+                            <div data-value="ogg">OGG</div>
+                            <div data-value="wav">WAV</div>
+                        </div>
+                    </div>
+                    <input type="hidden" id="batchFormat" value="mp3">
+                </div>
+                <div class="batch-opt-row">
+                    <span class="opt-label" style="margin:0">Quality</span>
+                    <div class="custom-dropdown" id="batchQualityDropdown">
+                        <div class="dropdown-selected" style="height:38px">
+                            <span>320 kbps</span>
+                            <i class="fas fa-chevron-down chev"></i>
+                        </div>
+                        <div class="dropdown-options">
+                            <div data-value="320" class="selected">320 kbps</div>
+                            <div data-value="192">192 kbps</div>
+                            <div data-value="128">128 kbps</div>
+                        </div>
+                    </div>
+                    <input type="hidden" id="batchQuality" value="320">
+                </div>
+            </div>
+            <div id="batchQueue" class="batch-queue hidden"></div>
+            <button id="batchStartBtn" class="download-btn" style="margin-top:14px">
+                <i class="fas fa-layer-group"></i> <span>Start Batch</span>
+            </button>
+        </div>
+    </div>
+
+    <div class="container">
+
+        <!-- Page hero -->
+        <div class="page-hero">
+            <h1 class="page-title">YouTube <span class="grad-text">→</span> Audio</h1>
+            <p class="page-sub">Convert any video or playlist to MP3, M4A, OGG or WAV — instantly.</p>
+        </div>
+
+        <main>
+            <!-- Input Card -->
+            <div class="card input-card">
+                <div class="input-row">
+                    <div class="input-wrapper">
+                        <i class="fab fa-youtube yt-icon"></i>
+                        <input type="text" id="videoUrl" placeholder="Paste a YouTube link or playlist..." autocomplete="off" spellcheck="false">
+                        <button id="clearBtn" class="clear-btn" title="Clear"><i class="fas fa-times"></i></button>
+                    </div>
+                    <button id="fetchBtn" class="fetch-btn">
+                        <span class="btn-text">Fetch</span>
+                        <div class="btn-spinner hidden"><i class="fas fa-circle-notch fa-spin"></i></div>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Video Info -->
+            <div id="videoInfo" class="hidden fade-in">
+
+                <div class="video-card">
+                    <div class="thumb-wrap">
+                        <img id="thumbnail" src="" alt="Thumbnail">
+                        <span id="videoDuration" class="duration-badge">0:00</span>
+                        <span id="playlistBadge" class="playlist-badge hidden">
+                            <i class="fas fa-list"></i> Playlist
+                        </span>
+                    </div>
+                    <div class="video-meta">
+                        <p class="meta-channel" id="videoAuthor">Channel</p>
+                        <h2 id="videoTitle">Video Title</h2>
+                    </div>
+                </div>
+
+                <div class="options-section">
+                    <div class="options-row">
+                        <div class="option-group">
+                            <label class="opt-label">Format</label>
+                            <div class="custom-dropdown" id="formatDropdown">
+                                <div class="dropdown-selected">
+                                    <span>MP3</span>
+                                    <i class="fas fa-chevron-down chev"></i>
+                                </div>
+                                <div class="dropdown-options">
+                                    <div data-value="mp3" class="selected">MP3 <span class="opt-hint">Universal</span></div>
+                                    <div data-value="m4a">M4A <span class="opt-hint">Apple/AAC</span></div>
+                                    <div data-value="ogg">OGG <span class="opt-hint">Open</span></div>
+                                    <div data-value="wav">WAV <span class="opt-hint">Lossless</span></div>
+                                </div>
+                            </div>
+                            <input type="hidden" id="audioFormat" value="mp3">
+                        </div>
+
+                        <div class="option-group">
+                            <label class="opt-label">Quality</label>
+                            <div class="custom-dropdown" id="qualityDropdown">
+                                <div class="dropdown-selected">
+                                    <span>320 kbps</span>
+                                    <i class="fas fa-chevron-down chev"></i>
+                                </div>
+                                <div class="dropdown-options">
+                                    <div data-value="320" class="selected">320 kbps <span class="opt-hint size-hint" data-kbps="320">Best</span></div>
+                                    <div data-value="192">192 kbps <span class="opt-hint size-hint" data-kbps="192">Great</span></div>
+                                    <div data-value="128">128 kbps <span class="opt-hint size-hint" data-kbps="128">Small</span></div>
+                                </div>
+                            </div>
+                            <input type="hidden" id="audioQuality" value="320">
+                        </div>
+                    </div>
+
+                    <!-- Filename options — hidden for playlists -->
+                    <div id="filenameRow">
+                        <div class="option-group" style="margin-top:14px;">
+                            <label class="opt-label">Filename Style</label>
+                            <div class="custom-dropdown" id="titleDropdown">
+                                <div class="dropdown-selected">
+                                    <span>Default (Title)</span>
+                                    <i class="fas fa-chevron-down chev"></i>
+                                </div>
+                                <div class="dropdown-options">
+                                    <div data-value="{title}" class="selected">Default (Title)</div>
+                                    <div data-value="{artist} - {title}">Artist – Title</div>
+                                    <div data-value="{title} [{artist}]">Title [Artist]</div>
+                                </div>
+                            </div>
+                            <input type="hidden" id="titleFormat" value="{title}">
+                        </div>
+
+                        <div class="clean-title-row">
+                            <label class="toggle-label" for="cleanTitleToggle">
+                                <span class="toggle-label-text">
+                                    <i class="fas fa-wand-magic-sparkles"></i>
+                                    Auto-clean title
+                                </span>
+                                <span id="cleanBadge" class="clean-badge hidden">cleaned</span>
+                            </label>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="cleanTitleToggle" checked>
+                                <span class="toggle-track"></span>
+                            </label>
+                        </div>
+
+                        <div id="originalTitleRow" class="original-title-row hidden">
+                            <span class="original-label">Original:</span>
+                            <span id="originalTitleText" class="original-text"></span>
+                        </div>
+
+                        <div class="filename-preview">
+                            <i class="fas fa-file-audio"></i>
+                            <input type="text" id="outputFilename">
+                            <button id="copyFilenameBtn" class="copy-btn" title="Copy filename">
+                                <i class="fas fa-copy"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <button id="downloadBtn" class="download-btn">
+                    <i class="fas fa-arrow-down-to-line"></i>
+                    <span>Download Audio</span>
+                </button>
+            </div>
+
+            <!-- Progress -->
+            <div id="downloadProgress" class="hidden fade-in progress-card">
+                <div class="progress-header">
+                    <span id="statusMessage" class="status-msg">Starting...</span>
+                    <span id="progressText" class="progress-pct">0%</span>
+                </div>
+                <div class="progress-track">
+                    <div class="progress-fill" id="progressBar"></div>
+                </div>
+                <div id="progressHint" class="progress-hint">This may take a minute for longer videos.</div>
+                <div id="etaRow" class="eta-row hidden">
+                    <i class="fas fa-gauge-high"></i>
+                    <span id="etaText">Calculating ETA...</span>
+                </div>
+
+                <div id="expiryRow" class="expiry-row hidden">
+                    <i class="fas fa-clock"></i>
+                    Link expires in <span id="expiryTimer" class="expiry-timer">60:00</span>
+                </div>
+            </div>
+        </main>
+
+        <footer>
+            <p>For personal use only · Respect copyright laws · <a href="https://github.com/Dany0443/mp3" target="_blank" rel="noopener" class="footer-source-link">Source</a></p>
+        </footer>
+    </div>
+
+    <script src="./script.js"></script>
+</body>
+</html>

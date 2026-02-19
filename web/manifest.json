@@ -1,0 +1,27 @@
+{
+  "name": "FastMP3",
+  "short_name": "FastMP3",
+  "description": "YouTube to Audio converter",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a0a0a",
+  "theme_color": "#0a0a0a",
+  "icons": [
+  {
+    "src": "/cloud.png",
+    "sizes": "192x192",
+    "type": "image/png",
+    "purpose": "any maskable"
+  }
+],
+  "share_target": {
+    "action": "/",
+    "method": "GET",
+    "enctype": "application/x-www-form-urlencoded",
+    "params": {
+      "url": "url",
+      "text": "url",
+      "title": "title"
+    }
+  }
+}
