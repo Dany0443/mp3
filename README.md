@@ -25,7 +25,7 @@ Convert YouTube videos and playlists to audio files from your browser.
 ## Setup
 
 ```bash
-git clone https://github.com/yourusername/fastmp3
+git clone https://github.com/Dany0443/fastmp3
 cd fastmp3
 npm install
 node server.js
@@ -43,3 +43,4 @@ Open `http://localhost:3556` in your browser.
 ## License
 
 MIT
+
