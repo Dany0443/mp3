@@ -18,7 +18,7 @@ Convert YouTube videos and playlists to audio files from your browser.
 
 ## Requirements
 
-- [Node.js](https://nodejs.org) 18+
+- [Node.js](https://nodejs.org) 25.7.0
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp)
 - [ffmpeg](https://ffmpeg.org)
 
@@ -43,5 +43,6 @@ Open `http://localhost:3556` in your browser.
 ## License
 
 MIT
+
 
 
