@@ -1,0 +1,7 @@
+.apikey
+yt-cookies.txt
+.env
+node_modules/
+temp/
+*.log
+.pm2/
