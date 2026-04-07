@@ -44,7 +44,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let savedMeta      = null;
     let etaStartTime   = null;
 
-    // ── Title cleaner — declared first so nothing hits TDZ ───────────────────
+    // ── Title cleaner ─────────────────────────────────────────────────────────
     const CLEAN_PATTERNS = [
         { re: /[\(\[]\s*(?:(?:official|oficial|music|video|videoclip|audio|clip|visualizer|lyrics?|performance|live|session|acoustic|version|ver\.?|edit|mix|remix|remaster(?:ed)?|hq|hd|4k|uhd|720p|1080p|full|fan|made|animated|animation|colou?r(?:ized)?|karaoke|instrumental|extended|radio|single|ep|deluxe|bonus|vevo|topic)\s*){1,5}[\)\]]/gi, rep: '' },
         { re: /[\(\[]\s*ofici?al\s*[\)\]]/gi, rep: '' },
@@ -68,7 +68,7 @@ document.addEventListener('DOMContentLoaded', () => {
         return { cleaned: result, wasModified: result !== raw };
     }
 
-    // ── Utilities — also declared early ──────────────────────────────────────
+    // ── Utilities ─────────────────────────────────────────────────────────────
     function sanitizeFilename(str) {
         return str.replace(/[\/:*?"<>|]/g, '').replace(/\.{2,}/g, '.').replace(/^[\s.]+|[\s.]+$/g, '').substring(0, 120).trim() || 'download';
     }
@@ -87,11 +87,22 @@ document.addEventListener('DOMContentLoaded', () => {
     // ── Bootstrap ─────────────────────────────────────────────────────────────
     async function bootstrap() {
         try {
-            const res  = await fetch('/api/client-key');
+            const res  = await fetch('api/client-key');
             const data = await res.json();
             apiKey = data.key;
         } catch {
             showError('Could not reach server. Is it running?');
+            return;
+        }
+
+        const params  = new URLSearchParams(window.location.search);
+        const shared  = params.get('url') || params.get('text') || params.get('title') || '';
+        const ytMatch = shared.match(/(https?:\/\/(?:www\.)?(?:youtube\.com|youtu\.be)\S+)/);
+        if (ytMatch) {
+            const ytUrl = ytMatch[1].trim();
+            el.urlInput.value = ytUrl;
+            try { window.history.replaceState({}, '', window.location.pathname); } catch {}
+            setTimeout(() => fetchVideoInfo(), 300);
         }
     }
 
@@ -137,7 +148,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 hiddenInput.value = option.getAttribute('data-value');
                 dropdown.classList.remove('open');
                 if (currentVideo) updateFilename();
-                if (currentVideo) updateSizeHints(); // recalc on any format/quality change
+                if (currentVideo) updateSizeHints();
             });
         });
     }
@@ -147,23 +158,18 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // ── File size hints ───────────────────────────────────────────────────────
-    // Bitrate reference per format:
-    //   mp3/ogg  → uses the selected kbps directly
-    //   m4a(aac) → AAC is ~30% smaller than MP3 at same bitrate
-    //   wav      → uncompressed PCM: 44100 * 16bit * 2ch = ~10 MB/min regardless of quality
     function updateSizeHints() {
         if (!currentVideo?.lengthSeconds) return;
         const secs   = currentVideo.lengthSeconds;
-        const format = el.audioFormat.value; // mp3 | m4a | ogg | wav
+        const format = el.audioFormat.value;
 
         document.querySelectorAll('.size-hint').forEach(hint => {
             let mb;
             if (format === 'wav') {
-                // Uncompressed: 44100 Hz * 16 bit * 2 ch = 1411 kbps
                 mb = (1411 * 1000 / 8 * secs) / (1024 * 1024);
             } else {
                 let kbps = parseInt(hint.dataset.kbps);
-                if (format === 'm4a') kbps = kbps * 0.7; // AAC efficiency
+                if (format === 'm4a') kbps = kbps * 0.7;
                 mb = (kbps * 1000 / 8 * secs) / (1024 * 1024);
             }
             hint.textContent = `~${mb.toFixed(1)} MB`;
@@ -177,12 +183,23 @@ document.addEventListener('DOMContentLoaded', () => {
         el.btnSpinner.classList.toggle('hidden', !loading);
     }
 
+    let isFetching = false;
     async function fetchVideoInfo() {
+        resetDownloadUI();
+
+        // FIX: Clear savedMeta when fetching a new video so old tags don't
+        // bleed into the next download. Also re-syncs the metadata panel.
+        savedMeta = null;
+
+        if (isFetching) return;
+        isFetching = true;
+
         const url = el.urlInput.value.trim();
         if (!url) {
             el.urlInput.focus();
             el.urlInput.style.borderColor = 'var(--red)';
             setTimeout(() => el.urlInput.style.borderColor = '', 1500);
+            isFetching = false;
             return;
         }
 
@@ -190,8 +207,9 @@ document.addEventListener('DOMContentLoaded', () => {
         clearExpiry();
 
         try {
-            const res  = await apiFetch(`/api/video-info?url=${encodeURIComponent(url)}`);
+            const res = await apiFetch(`/mp3/api/video-info?url=${encodeURIComponent(url)}`);
             const data = await res.json();
+
             if (data.error) throw new Error(data.message || 'Failed to fetch info');
 
             currentVideo = data;
@@ -201,32 +219,69 @@ document.addEventListener('DOMContentLoaded', () => {
                 el.author.textContent   = `${data.count} tracks`;
                 el.duration.textContent = '';
                 el.thumb.src            = data.thumbnailUrl || '';
-                el.playlistBadge?.classList.remove('hidden');
-                el.filenameRow?.classList.add('hidden');
+                if(el.playlistBadge) el.playlistBadge.classList.remove('hidden');
+                if(el.filenameRow) el.filenameRow.classList.add('hidden');
             } else {
                 el.title.textContent    = data.title;
                 el.author.textContent   = data.author;
-                el.duration.textContent = formatTime(data.lengthSeconds);
                 el.thumb.src            = data.thumbnailUrl;
-                el.playlistBadge?.classList.add('hidden');
-                el.filenameRow?.classList.remove('hidden');
-                updateFilename();
-                updateSizeHints();
+                if(el.playlistBadge) el.playlistBadge.classList.add('hidden');
+                if(el.filenameRow) el.filenameRow.classList.remove('hidden');
+
+                if (typeof updateFilename === 'function') updateFilename();
+                if (typeof updateSizeHints === 'function') updateSizeHints();
+
+                if (data.fromOembed && data.videoId) {
+                    el.duration.textContent = '';
+                    pollForDuration(data.videoId);
+                } else {
+                    el.duration.textContent = formatTime(data.lengthSeconds);
+                }
             }
 
             el.infoSection.classList.remove('hidden');
-            el.progressSection.classList.add('hidden');
-            syncPreviewPanel();
-            syncMetadataPanel();
+            if(el.progressSection) el.progressSection.classList.add('hidden');
+
+            if (typeof syncPreviewPanel === 'function') syncPreviewPanel();
+            // FIX: Always re-sync metadata panel when a new video is fetched
+            // (savedMeta was cleared above, so this fills in fresh values)
+            if (typeof syncMetadataPanel === 'function') syncMetadataPanel();
 
         } catch (err) {
-            showError('Could not fetch: ' + err.message);
+            if (typeof showError === 'function') showError('Could not fetch: ' + err.message);
+            else alert('Could not fetch: ' + err.message);
         } finally {
             setFetchLoading(false);
+            isFetching = false;
         }
     }
 
-    // ── Filename ──────────────────────────────────────────────────────────────
+    // ── Duration poller ───────────────────────────────────────────────────────
+    let durationPollTimer = null;
+
+    function pollForDuration(videoId) {
+        clearTimeout(durationPollTimer);
+        let attempts = 0;
+        const MAX    = 12;
+
+        function poll() {
+            if (attempts++ >= MAX) return;
+            apiFetch(`/mp3/api/video-duration/${videoId}`)
+                .then(r => r.json())
+                .then(d => {
+                    if (d.lengthSeconds) {
+                        if (currentVideo) currentVideo.lengthSeconds = d.lengthSeconds;
+                        el.duration.textContent = formatTime(d.lengthSeconds);
+                        updateSizeHints();
+                    } else {
+                        durationPollTimer = setTimeout(poll, 1000);
+                    }
+                })
+                .catch(() => { durationPollTimer = setTimeout(poll, 1500); });
+        }
+        durationPollTimer = setTimeout(poll, 800);
+    }
+
     function updateFilename() {
         if (!currentVideo || currentVideo.isPlaylist) return;
         const template = el.titleFormat.value;
@@ -270,167 +325,268 @@ document.addEventListener('DOMContentLoaded', () => {
         const quality  = el.audioQuality.value;
         const filename = el.filename.value;
 
-        let metaParams = '';
+        // FIX: Use 'embedThumb' — matches what the server now reads as
+        // either 'embedThumb' or 'embedThumbnail' (backward compat kept on server)
+        const embedThumb = document.getElementById('metaEmbedThumb')?.checked ? '1' : '0';
+
+        const bodyParams = new URLSearchParams();
+        bodyParams.set('url',        url);
+        bodyParams.set('format',     format);
+        bodyParams.set('quality',    quality);
+        bodyParams.set('filename',   filename);
+        bodyParams.set('embedThumb', embedThumb);   // FIX: was 'embedThumbnail' on old client
+
+        // FIX: Pass metadata as individual params — the server reads these via req.query
+        // and assembles them into a metaTags object. Previously the param names didn't
+        // match between client and server.
         if (savedMeta) {
-            const mp = new URLSearchParams();
-            if (savedMeta.title)  mp.set('metaTitle',  savedMeta.title);
-            if (savedMeta.artist) mp.set('metaArtist', savedMeta.artist);
-            if (savedMeta.album)  mp.set('metaAlbum',  savedMeta.album);
-            if (savedMeta.year)   mp.set('metaYear',   savedMeta.year);
-            if (savedMeta.genre)  mp.set('metaGenre',  savedMeta.genre);
-            if (savedMeta.track)  mp.set('metaTrack',  savedMeta.track);
-            metaParams = '&' + mp.toString();
+            if (savedMeta.title)  bodyParams.set('metaTitle',  savedMeta.title);
+            if (savedMeta.artist) bodyParams.set('metaArtist', savedMeta.artist);
+            if (savedMeta.album)  bodyParams.set('metaAlbum',  savedMeta.album);
+            if (savedMeta.year)   bodyParams.set('metaYear',   savedMeta.year);
+            if (savedMeta.genre)  bodyParams.set('metaGenre',  savedMeta.genre);
+            if (savedMeta.track)  bodyParams.set('metaTrack',  savedMeta.track);
         }
 
         try {
-            const res  = await apiFetch(
-                `/api/download?url=${encodeURIComponent(url)}&format=${format}&quality=${quality}&filename=${encodeURIComponent(filename)}${metaParams}`
-            );
+            const res = await apiFetch(`/mp3/api/download?${bodyParams.toString()}`);
             const data = await res.json();
-            if (!data.id) throw new Error('Failed to start download');
+
+            if (data.error) throw new Error(data.message || 'Failed to start download');
+            if (!data.id) throw new Error('Failed to start download: No Job ID returned');
+
             etaStartTime = Date.now();
             startFakeRamp();
             listenToProgress(data.id);
+
         } catch (err) {
             el.statusMsg.textContent = 'Error: ' + err.message;
             el.downloadBtn.disabled  = false;
         }
     }
 
-    // Fake progress ramp: 0→95 over ~5s, then holds until server says done
+    // Fake progress ramp: 0→95 over ~6s, then holds until server says done
     let fakeRampInterval = null;
 
     function startFakeRamp() {
         stopFakeRamp();
         let fakeProgress = 0;
-        const RAMP_DURATION = 3000; // ms to reach 95%
-        const TICK = 80;            // update every 80ms
+        const RAMP_DURATION = 6000;
+        const TICK = 80;
         const steps = RAMP_DURATION / TICK;
-        const increment = 95 / steps;
+        const increment = 90 / steps;
         let countdown = Math.ceil(RAMP_DURATION / 1000);
 
-        el.etaRow?.classList.remove('hidden');
-        el.etaText.textContent = `~${countdown}s remaining`;
+        if (el.etaRow) el.etaRow.classList.remove('hidden');
+        if (el.etaText) el.etaText.textContent = `~${countdown}s remaining`;
+
+        el.progressBar.style.backgroundColor = '';
 
         fakeRampInterval = setInterval(() => {
             fakeProgress = Math.min(fakeProgress + increment, 95);
             el.progressBar.style.width  = fakeProgress.toFixed(1) + '%';
             el.progressText.textContent = Math.floor(fakeProgress) + '%';
 
-            // Countdown in whole seconds
             const newCountdown = Math.max(1, Math.ceil((95 - fakeProgress) / increment * TICK / 1000));
             if (newCountdown !== countdown) {
                 countdown = newCountdown;
-                el.etaText.textContent = `~${countdown}s remaining`;
+                if (el.etaText) el.etaText.textContent = `~${countdown}s remaining`;
             }
 
             if (fakeProgress >= 95) {
                 stopFakeRamp();
-                el.statusMsg.textContent    = 'Finalizing...';
-                el.etaText.textContent      = 'Almost done...';
+                if (el.statusMsg) el.statusMsg.textContent = 'Finalizing...';
+                if (el.etaText) el.etaText.textContent     = 'Almost done...';
             }
         }, TICK);
     }
+
+    let ffmpegRampInterval = null;
 
     function stopFakeRamp() {
         if (fakeRampInterval) { clearInterval(fakeRampInterval); fakeRampInterval = null; }
     }
 
-    function listenToProgress(id) {
-        if (eventSource) eventSource.close();
+    function stopFfmpegRamp() {
+        if (ffmpegRampInterval) { clearInterval(ffmpegRampInterval); ffmpegRampInterval = null; }
+    }
+
+    function listenToProgress(id, isCached = false) {
+        if (eventSource) {
+            eventSource.close();
+            eventSource = null;
+        }
+
+        stopFfmpegRamp();
+
+        if (!isCached) {
+            startFakeRamp();
+        }
+
         const qs = `?_k=${encodeURIComponent(apiKey || '')}`;
-        eventSource = new EventSource(`/api/download-progress/${id}${qs}`);
+        eventSource = new EventSource(`/mp3/api/download-progress/${id}${qs}`);
 
         eventSource.onmessage = e => {
             let data;
             try { data = JSON.parse(e.data); } catch { return; }
 
-            // Only show status text updates from server — let fake ramp own the bar
             if (data.status && data.status !== 'Queued') {
-                el.statusMsg.textContent = data.status;
+                if (!ffmpegRampInterval) el.statusMsg.textContent = data.status;
             }
 
-            if (data.status === 'Queued')     el.progressHint.textContent = 'Waiting in queue...';
-            if (data.isPlaylist && data.total) el.progressHint.textContent = `Tracks: ${data.done || 0} / ${data.total} done`;
+            if (typeof data.progress === 'number' && data.progress > 5 && data.progress < 100) {
+                stopFakeRamp();
+
+                if (data.progress >= 90) {
+                    if (!ffmpegRampInterval) {
+                        let currentProg = 90;
+                        ffmpegRampInterval = setInterval(() => {
+                            currentProg = Math.min(currentProg + 0.34, 99.5);
+                            el.progressBar.style.width = currentProg.toFixed(1) + '%';
+                            el.progressText.textContent = Math.floor(currentProg) + '%';
+                            if (el.statusMsg) el.statusMsg.textContent = 'Converting...';
+                        }, 250);
+                    }
+                } else {
+                    el.progressBar.style.width  = data.progress + '%';
+                    el.progressText.textContent = Math.round(data.progress) + '%';
+                }
+            }
+
+            if (data.speed || data.eta) {
+                if (el.etaRow) el.etaRow.classList.remove('hidden');
+                const parts = [];
+                if (data.speed) parts.push(data.speed);
+                if (data.eta)   parts.push(`ETA ${data.eta}`);
+                if (el.etaText && !ffmpegRampInterval) el.etaText.textContent = parts.join(' · ');
+                if (ffmpegRampInterval && el.etaRow) el.etaRow.classList.add('hidden');
+            }
+
+            if (data.status === 'Queued') {
+                if (el.progressHint) el.progressHint.textContent = 'Waiting in queue...';
+            }
+            if (data.isPlaylist && data.total) {
+                if (el.progressHint) el.progressHint.textContent = `Tracks: ${data.done || 0} / ${data.total} done`;
+            }
 
             if (data.error) {
                 stopFakeRamp();
+                stopFfmpegRamp();
                 eventSource.close();
                 el.statusMsg.textContent    = data.status || 'Something went wrong.';
                 el.statusMsg.style.color    = 'var(--red)';
-                el.progressHint.textContent = 'Please try again.';
-                el.downloadBtn.disabled     = false;
-                el.etaRow?.classList.add('hidden');
+                el.progressBar.style.backgroundColor = 'var(--red)';
+                if (el.progressHint) el.progressHint.textContent = 'Please try again.';
+                if (el.downloadBtn)  el.downloadBtn.disabled     = false;
+                if (el.etaRow)       el.etaRow.classList.add('hidden');
                 return;
             }
 
             if (data.complete) {
                 stopFakeRamp();
+                stopFfmpegRamp();
                 eventSource.close();
-                el.etaRow?.classList.add('hidden');
+                if (el.etaRow) el.etaRow.classList.add('hidden');
+
                 if (!data.downloadUrl) {
                     el.statusMsg.textContent = 'Error: download URL missing. Please retry.';
                     el.statusMsg.style.color = 'var(--red)';
-                    el.downloadBtn.disabled  = false;
+                    if (el.downloadBtn) el.downloadBtn.disabled = false;
                     return;
                 }
-                // Quickly fill to 100% then finish
+
                 el.progressBar.style.width  = '100%';
                 el.progressText.textContent = '100%';
-                finishDownload(data);
+                el.progressBar.style.backgroundColor = '#00C851';
+                if (el.statusMsg) el.statusMsg.textContent = 'Done!';
+
+                if (typeof finishDownload === 'function') {
+                    finishDownload(data);
+                }
             }
         };
 
         eventSource.onerror = () => {
             stopFakeRamp();
+            stopFfmpegRamp();
             eventSource.close();
             el.statusMsg.textContent = 'Connection lost. Please try again.';
             el.statusMsg.style.color = 'var(--red)';
-            el.downloadBtn.disabled  = false;
-            el.etaRow?.classList.add('hidden');
+            if (el.downloadBtn) el.downloadBtn.disabled  = false;
+            if (el.etaRow)      el.etaRow.classList.add('hidden');
         };
     }
 
     function finishDownload(data) {
-        const isPlaylist   = data.isPlaylist;
-        const saveFilename = data.filename || el.filename.value || 'download';
+        const qs = `?_k=${encodeURIComponent(apiKey || '')}`;
+        const cleanUrl = data.downloadUrl.startsWith('/mp3') ? data.downloadUrl : `/mp3${data.downloadUrl}`;
+        const fullDownloadUrl = `${cleanUrl}${qs}`;
 
-        el.statusMsg.textContent    = isPlaylist ? 'Playlist ready!' : 'Ready to save!';
-        el.progressBar.style.width  = '100%';
-        el.progressText.textContent = '100%';
-        el.progressHint.textContent = isPlaylist
-            ? `${data.done} of ${data.total} tracks downloaded as ZIP` : '';
+        const urlInput = document.getElementById('urlInput');
+        const historyItem = {
+            id: data.id || urlInput?.value || Date.now(),
+            title: data.title || document.getElementById('previewTitle')?.innerText || 'Unknown Title',
+            author: data.author || document.getElementById('previewAuthor')?.innerText || '',
+            thumbnail: data.thumbnail || document.getElementById('previewThumb')?.src || '',
+            format: 'mp3',
+            quality: data.quality || '320',
+            date: Date.now(),
+            url: fullDownloadUrl,
+            filename: (data.title || 'audio') + '.mp3',
+            sourceUrl: urlInput?.value || ''
+        };
+        addToHistory(historyItem);
 
-        el.progressSection.querySelector('.download-success-btn')?.remove();
+        const a = document.createElement('a');
+        a.href = fullDownloadUrl;
+        a.download = '';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
 
-        const btn    = document.createElement('a');
-        btn.href     = data.downloadUrl + `?_k=${encodeURIComponent(apiKey || '')}`;
-        btn.className = 'download-success-btn';
-        btn.innerHTML = isPlaylist
-            ? '<i class="fas fa-file-zipper"></i> Save ZIP'
-            : '<i class="fas fa-file-arrow-down"></i> Save File';
-        btn.download = saveFilename;
-        el.progressSection.appendChild(btn);
-        btn.click();
+        const originalBtn = document.getElementById('downloadBtn');
+        if (originalBtn) originalBtn.style.display = 'none';
 
-        el.downloadBtn.disabled = false;
+        const previewAudio = document.getElementById('previewAudio');
+        const previewPlayerWrap = document.getElementById('previewPlayerWrap');
+        const previewPlayBtn = document.getElementById('previewPlayBtn');
 
-        if (currentVideo) {
-            addToHistory({
-                title:     currentVideo.title,
-                author:    currentVideo.author,
-                thumbnail: currentVideo.thumbnailUrl,
-                format:    el.audioFormat.value,
-                quality:   el.audioQuality.value,
-                filename:  saveFilename,
-                url:       btn.href,
-                expiresAt: data.expiresAt || null,
-                date:      Date.now(),
-                isPlaylist: !!isPlaylist,
-            });
+        if (previewAudio && previewPlayerWrap) {
+            previewAudio.src = fullDownloadUrl;
+            previewAudio.style.colorScheme = 'dark';
+            previewPlayerWrap.classList.remove('hidden');
+            if (previewPlayBtn) previewPlayBtn.style.display = 'none';
         }
 
-        if (data.expiresAt) startExpiry(data.expiresAt);
+        if (!document.getElementById('postDownloadActions')) {
+            const actionsContainer = document.createElement('div');
+            actionsContainer.id = 'postDownloadActions';
+            actionsContainer.style.display = 'flex';
+            actionsContainer.style.flexDirection = 'column';
+            actionsContainer.style.gap = '15px';
+            actionsContainer.style.marginTop = '15px';
+
+            const reloadBtn = document.createElement('button');
+            reloadBtn.className = 'download-btn';
+            reloadBtn.innerHTML = '<i class="fas fa-redo"></i><span>Download Another</span>';
+            reloadBtn.onclick = () => window.location.reload();
+
+            const saveBtn = document.createElement('a');
+            saveBtn.href = fullDownloadUrl;
+            saveBtn.className = 'download-btn';
+            saveBtn.style.background = 'var(--surface3)';
+            saveBtn.style.border = '1px solid var(--border2)';
+            saveBtn.style.textDecoration = 'none';
+            saveBtn.innerHTML = '<i class="fas fa-download"></i><span>Save File (Manual)</span>';
+            saveBtn.download = '';
+
+            actionsContainer.appendChild(reloadBtn);
+            actionsContainer.appendChild(saveBtn);
+
+            if (originalBtn && originalBtn.parentElement) {
+                originalBtn.parentElement.appendChild(actionsContainer);
+            }
+        }
     }
 
     // ── Expiry countdown ──────────────────────────────────────────────────────
@@ -495,7 +651,6 @@ document.addEventListener('DOMContentLoaded', () => {
             const active  = document.activeElement;
             const isInput = active.tagName === 'INPUT' || active.tagName === 'TEXTAREA';
 
-            // Cmd/Ctrl+V anywhere (outside inputs) → paste & fetch
             if ((e.metaKey || e.ctrlKey) && e.key === 'v' && !isInput) {
                 e.preventDefault();
                 navigator.clipboard.readText().then(text => {
@@ -506,14 +661,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 }).catch(() => {});
             }
 
-            // Enter (outside inputs, info visible) → download
             if (e.key === 'Enter' && !isInput &&
                 !el.infoSection.classList.contains('hidden') &&
                 !el.downloadBtn.disabled) {
                 startDownload();
             }
 
-            // Escape → close panels / unfocus
             if (e.key === 'Escape') {
                 closeAllPanels();
                 active.blur();
@@ -535,7 +688,6 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!panel) return;
         panel.classList.remove('hidden');
         backdrop?.classList.remove('hidden');
-        // rAF so the browser paints before we add the transition class
         requestAnimationFrame(() => {
             requestAnimationFrame(() => {
                 panel.classList.add('panel-open');
@@ -628,7 +780,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const format  = el.audioFormat.value;
             const quality = el.audioQuality.value;
             const res     = await apiFetch(
-                `/api/download?url=${encodeURIComponent(url)}&format=${format}&quality=${quality}&filename=preview&preview=1`
+                `/mp3/api/download?url=${encodeURIComponent(url)}&format=${format}&quality=${quality}&filename=preview&preview=1`
             );
             const data = await res.json();
             if (!data.id) throw new Error('Preview failed to start');
@@ -713,27 +865,28 @@ document.addEventListener('DOMContentLoaded', () => {
     function saveHistory(h) { localStorage.setItem('dlHistory', JSON.stringify(h.slice(0, 50))); }
 
     function addToHistory(item) {
-        const h = getHistory();
-        const sourceUrl = el.urlInput.value.trim();
-        const newEntry  = { ...item, sourceUrl };
-
-        // If same video URL already exists, replace it in-place and move to top
-        const existingIdx = h.findIndex(e => e.sourceUrl && e.sourceUrl === sourceUrl);
-        if (existingIdx !== -1) {
-            h.splice(existingIdx, 1);
+        let history = getHistory();
+        const itemId = item.id || item.videoId;
+        if (itemId) {
+            history = history.filter(h => (h.id || h.videoId) !== itemId);
         }
-        h.unshift(newEntry);
-
-        saveHistory(h);
-        updateHistoryBadge();
+        history.unshift(item);
+        saveHistory(history);
+        if (typeof renderHistory === 'function') renderHistory();
     }
 
     function updateHistoryBadge() {
-        const badge   = document.getElementById('historyBadge');
-        const count   = getHistory().length;
-        if (!badge) return;
-        badge.textContent = count > 9 ? '9+' : count;
-        badge.classList.toggle('hidden', count === 0);
+        const count = getHistory().length;
+        const badge = document.getElementById('historyBadge');
+        if (badge) {
+            badge.textContent = count > 9 ? '9+' : count;
+            badge.classList.toggle('hidden', count === 0);
+        }
+        const badgeD = document.getElementById('historyBadgeDesktop');
+        if (badgeD) {
+            badgeD.textContent = count > 9 ? '9+' : count;
+            badgeD.classList.toggle('hidden', count === 0);
+        }
     }
 
     function renderHistory() {
@@ -754,6 +907,7 @@ document.addEventListener('DOMContentLoaded', () => {
         list.innerHTML = history.map((item, i) => {
             const date    = new Date(item.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
             const expired = item.expiresAt && Date.now() > item.expiresAt;
+            const canRefetch = expired && item.sourceUrl;
             return `<div class="history-item">
                 <img src="${escHtml(item.thumbnail || '')}" class="history-thumb" alt="" onerror="this.style.display='none'">
                 <div class="history-info">
@@ -763,11 +917,24 @@ document.addEventListener('DOMContentLoaded', () => {
                 <div class="history-actions">
                     ${!expired && item.url
                         ? `<a href="${escHtml(item.url)}" download="${escHtml(item.filename)}" class="history-dl-btn" title="Re-download"><i class="fas fa-arrow-down"></i></a>`
-                        : `<span class="history-expired" title="Expired"><i class="fas fa-clock"></i></span>`}
+                        : canRefetch
+                            ? `<button class="history-dl-btn history-refetch-btn" data-url="${escHtml(item.sourceUrl)}" title="Re-convert & download"><i class="fas fa-rotate-right"></i></button>`
+                            : `<span class="history-expired" title="Expired"><i class="fas fa-clock"></i></span>`}
                     <button class="history-del-btn" data-index="${i}" title="Remove"><i class="fas fa-xmark"></i></button>
                 </div>
             </div>`;
         }).join('');
+
+        list.querySelectorAll('.history-refetch-btn').forEach(btn => {
+            btn.addEventListener('click', e => {
+                e.stopPropagation();
+                const ytUrl = btn.dataset.url;
+                if (!ytUrl) return;
+                closeAllPanels();
+                el.urlInput.value = ytUrl;
+                fetchVideoInfo();
+            });
+        });
 
         list.querySelectorAll('.history-del-btn').forEach(btn => {
             btn.addEventListener('click', e => {
@@ -779,7 +946,6 @@ document.addEventListener('DOMContentLoaded', () => {
             });
         });
 
-        // Wire clear-all (re-attach each render since innerHTML replaces it)
         const clearBtn = document.getElementById('clearHistoryBtn');
         if (clearBtn) {
             clearBtn.onclick = () => {
@@ -792,12 +958,15 @@ document.addEventListener('DOMContentLoaded', () => {
     function syncMetadataPanel() {
         if (!currentVideo || currentVideo.isPlaylist) return;
 
-        // If user already clicked "Apply Tags", don't clobber their manual edits
+        // FIX: savedMeta is cleared in fetchVideoInfo() before this is called,
+        // so this block always runs for a fresh video fetch. It will also NOT
+        // run if the user has manually saved tags (savedMeta !== null), because
+        // fetchVideoInfo() only clears savedMeta, and re-calls syncMetadataPanel
+        // after clearing — at which point savedMeta is null and we fill in fresh data.
         if (savedMeta) return;
 
         const { cleaned } = smartCleanTitle(currentVideo.title);
 
-        // Always overwrite with fresh video data on every new fetch
         const fields = {
             metaTitle:  cleaned || currentVideo.title,
             metaArtist: currentVideo.author || '',
@@ -811,32 +980,76 @@ document.addEventListener('DOMContentLoaded', () => {
             if (input) input.value = val;
         });
 
-        // Clear any stale "Tags will be embedded" message
         document.getElementById('metaSavedMsg')?.classList.add('hidden');
     }
 
     function initMetadataPanel() {
         document.getElementById('metaSaveBtn')?.addEventListener('click', () => {
             savedMeta = {
-                title:  document.getElementById('metaTitle')?.value.trim(),
-                artist: document.getElementById('metaArtist')?.value.trim(),
-                album:  document.getElementById('metaAlbum')?.value.trim(),
-                year:   document.getElementById('metaYear')?.value.trim(),
-                genre:  document.getElementById('metaGenre')?.value.trim(),
-                track:  document.getElementById('metaTrack')?.value.trim(),
+                title:  document.getElementById('metaTitle')?.value.trim()  || null,
+                artist: document.getElementById('metaArtist')?.value.trim() || null,
+                album:  document.getElementById('metaAlbum')?.value.trim()  || null,
+                year:   document.getElementById('metaYear')?.value.trim()   || null,
+                genre:  document.getElementById('metaGenre')?.value.trim()  || null,
+                track:  document.getElementById('metaTrack')?.value.trim()  || null,
             };
+
+            // FIX: Only save if at least one field has a value
+            const hasAnyValue = Object.values(savedMeta).some(Boolean);
+            if (!hasAnyValue) {
+                savedMeta = null;
+                return;
+            }
+
             const msg = document.getElementById('metaSavedMsg');
-            msg?.classList.remove('hidden');
-            setTimeout(() => msg?.classList.add('hidden'), 3000);
+            if (msg) {
+                msg.textContent = '✓ Tags will be embedded on download';
+                msg.classList.remove('hidden');
+                // Keep it visible so user knows tags are active — hide on next fetch
+            }
         });
 
         document.getElementById('metaClearBtn')?.addEventListener('click', () => {
-            savedMeta = null; // allow syncMetadataPanel to re-fill on next fetch
+            savedMeta = null;
             ['metaTitle', 'metaArtist', 'metaAlbum', 'metaYear', 'metaGenre', 'metaTrack']
                 .forEach(id => { const e = document.getElementById(id); if (e) e.value = ''; });
-            document.getElementById('metaSavedMsg')?.classList.add('hidden');
-            if (currentVideo) syncMetadataPanel(); // re-fill with current video
+            const msg = document.getElementById('metaSavedMsg');
+            if (msg) {
+                msg.textContent = 'Tags cleared.';
+                msg.classList.remove('hidden');
+                setTimeout(() => msg?.classList.add('hidden'), 2000);
+            }
+            if (currentVideo) syncMetadataPanel();
         });
+    }
+
+    function resetDownloadUI() {
+        const postActions = document.getElementById('postDownloadActions');
+        if (postActions) postActions.remove();
+
+        const originalBtn = document.getElementById('downloadBtn');
+        if (originalBtn) {
+            originalBtn.style.display = 'flex';
+            originalBtn.disabled = false;
+            originalBtn.classList.remove('disabled');
+        }
+
+        const previewAudio = document.getElementById('previewAudio');
+        const previewPlayerWrap = document.getElementById('previewPlayerWrap');
+        const previewPlayBtn = document.getElementById('previewPlayBtn');
+
+        if (previewAudio) {
+            previewAudio.pause();
+            previewAudio.src = '';
+        }
+        if (previewPlayerWrap) previewPlayerWrap.classList.add('hidden');
+        if (previewPlayBtn)    previewPlayBtn.style.display = '';
+
+        if (window.el && el.progressBar) {
+            el.progressBar.style.width = '0%';
+            el.progressBar.classList.remove('bg-green');
+        }
+        if (window.el && el.progressText) el.progressText.textContent = 'Ready';
     }
 
     // ── PANEL: Batch Download ─────────────────────────────────────────────────
@@ -865,74 +1078,96 @@ document.addEventListener('DOMContentLoaded', () => {
         queueEl.classList.remove('hidden');
         startBtn.disabled = true;
 
-        queueEl.innerHTML = lines.map((url, i) =>
-            `<div class="batch-item" id="bi-${i}">
-                <span class="batch-url">${escHtml(url.substring(0, 55))}${url.length > 55 ? '…' : ''}</span>
-                <span class="batch-status" id="bs-${i}"><i class="fas fa-clock"></i> Queued</span>
-            </div>`
-        ).join('');
+        queueEl.innerHTML = `
+            <div class="batch-item batch-item-summary">
+                <span><i class="fas fa-circle-notch fa-spin"></i> Processing ${lines.length} URLs — a ZIP will be ready when done</span>
+            </div>
+            ${lines.map((url, i) =>
+                `<div class="batch-item" id="bi-${i}">
+                    <span class="batch-url">${escHtml(url.substring(0, 60))}${url.length > 60 ? '…' : ''}</span>
+                    <span class="batch-status" id="bs-${i}"><i class="fas fa-clock"></i> Queued</span>
+                </div>`
+            ).join('')}
+        `;
 
-        const completed = [];
-        for (let i = 0; i < lines.length; i++) {
-            const statusEl = document.getElementById(`bs-${i}`);
-            try {
-                if (statusEl) statusEl.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> Fetching...';
+        try {
+            const res  = await apiFetch('/api/batch-zip', {
+                method:  'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body:    JSON.stringify({ urls: lines, format, quality }),
+            });
+            const data = await res.json();
+            if (!data.id) throw new Error('Server did not return a job ID');
 
-                const infoRes = await apiFetch(`/api/video-info?url=${encodeURIComponent(lines[i])}`);
-                const info    = await infoRes.json();
-                if (info.error) throw new Error(info.message);
+            const qs = `?_k=${encodeURIComponent(apiKey || '')}`;
+            const es = new EventSource(`/api/download-progress/${data.id}${qs}`);
 
-                const fn = sanitizeFilename(info.title || `track_${i + 1}`);
-                if (statusEl) statusEl.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> Downloading...';
+            es.onmessage = e => {
+                let d; try { d = JSON.parse(e.data); } catch { return; }
 
-                const dlRes  = await apiFetch(`/api/download?url=${encodeURIComponent(lines[i])}&format=${format}&quality=${quality}&filename=${encodeURIComponent(fn)}`);
-                const dlData = await dlRes.json();
-                if (!dlData.id) throw new Error('No job ID');
-
-                await new Promise(resolve => {
-                    const qs = `?_k=${encodeURIComponent(apiKey || '')}`;
-                    const es = new EventSource(`/api/download-progress/${dlData.id}${qs}`);
-                    es.onmessage = e => {
-                        let d; try { d = JSON.parse(e.data); } catch { return; }
-                        if (statusEl && typeof d.progress === 'number')
-                            statusEl.innerHTML = `<i class="fas fa-circle-notch fa-spin"></i> ${d.progress}%`;
-                        if (d.complete && d.downloadUrl) {
-                            es.close();
-                            if (statusEl) statusEl.innerHTML = '<i class="fas fa-check" style="color:var(--green)"></i> Done';
-                            completed.push({ url: d.downloadUrl + qs, filename: fn + '.' + format });
-                            resolve();
+                if (typeof d.done === 'number' && d.total) {
+                    for (let i = 0; i < d.total; i++) {
+                        const st = document.getElementById(`bs-${i}`);
+                        if (!st) continue;
+                        if (i < d.done) {
+                            st.innerHTML = '<i class="fas fa-check" style="color:var(--green)"></i> Done';
+                        } else if (i === d.done) {
+                            st.innerHTML = '<i class="fas fa-circle-notch fa-spin"></i> Converting...';
                         }
-                        if (d.error) {
-                            es.close();
-                            if (statusEl) statusEl.innerHTML = '<i class="fas fa-xmark" style="color:var(--red)"></i> Failed';
-                            resolve();
-                        }
-                    };
-                    es.onerror = () => {
-                        es.close();
-                        if (statusEl) statusEl.innerHTML = '<i class="fas fa-xmark" style="color:var(--red)"></i> Error';
-                        resolve();
-                    };
-                });
-            } catch {
-                if (statusEl) statusEl.innerHTML = '<i class="fas fa-xmark" style="color:var(--red)"></i> Error';
-            }
+                    }
+                }
+
+                if (d.complete && d.downloadUrl) {
+                    es.close();
+                    startBtn.disabled = false;
+
+                    lines.forEach((_, i) => {
+                        const st = document.getElementById(`bs-${i}`);
+                        if (st && !st.innerHTML.includes('fa-check'))
+                            st.innerHTML = '<i class="fas fa-check" style="color:var(--green)"></i> Done';
+                    });
+
+                    const doneDiv = document.createElement('div');
+                    doneDiv.className = 'batch-done';
+                    doneDiv.innerHTML = `
+                        <p class="batch-done-title"><i class="fas fa-check-circle"></i> ${d.done} / ${d.total} tracks → ZIP ready</p>
+                        <a href="${escHtml(d.downloadUrl)}${qs}" download="${escHtml(d.filename)}" class="batch-dl-link">
+                            <i class="fas fa-file-zipper"></i> Download ZIP
+                        </a>
+                    `;
+                    queueEl.appendChild(doneDiv);
+                    doneDiv.querySelector('a')?.click();
+                }
+
+                if (d.error) {
+                    es.close();
+                    startBtn.disabled = false;
+                    const errDiv = document.createElement('div');
+                    errDiv.className = 'batch-done';
+                    errDiv.style.color = 'var(--red)';
+                    errDiv.innerHTML = `<i class="fas fa-xmark"></i> Batch failed: ${escHtml(d.status || 'Unknown error')}`;
+                    queueEl.appendChild(errDiv);
+                }
+            };
+
+            es.onerror = () => {
+                es.close();
+                startBtn.disabled = false;
+                const errDiv = document.createElement('div');
+                errDiv.className = 'batch-done';
+                errDiv.style.color = 'var(--red)';
+                errDiv.textContent = 'Connection lost. Please try again.';
+                queueEl.appendChild(errDiv);
+            };
+
+        } catch (err) {
+            startBtn.disabled = false;
+            const errDiv = document.createElement('div');
+            errDiv.className = 'batch-done';
+            errDiv.style.color = 'var(--red)';
+            errDiv.textContent = 'Error: ' + err.message;
+            queueEl.appendChild(errDiv);
         }
-
-        startBtn.disabled = false;
-        const doneDiv = document.createElement('div');
-        doneDiv.className = 'batch-done';
-        doneDiv.innerHTML = `<p class="batch-done-title"><i class="fas fa-check-circle"></i> ${completed.length} / ${lines.length} files ready</p>`;
-        completed.forEach(item => {
-            const a     = document.createElement('a');
-            a.href      = item.url;
-            a.download  = item.filename;
-            a.className = 'batch-dl-link';
-            a.innerHTML = `<i class="fas fa-file-audio"></i> ${escHtml(item.filename)}`;
-            doneDiv.appendChild(a);
-            setTimeout(() => a.click(), 400);
-        });
-        queueEl.appendChild(doneDiv);
     }
 
     // ── Copy filename ─────────────────────────────────────────────────────────
@@ -972,7 +1207,6 @@ document.addEventListener('DOMContentLoaded', () => {
     el.clearBtn.addEventListener('click', () => { el.urlInput.value = ''; el.urlInput.focus(); });
     el.urlInput.addEventListener('keydown', e => { if (e.key === 'Enter') fetchVideoInfo(); });
 
-    // Theme toggle
     const toggle = document.getElementById('themeToggle');
     if (localStorage.getItem('theme') === 'light') {
         document.body.classList.add('light-mode');
@@ -991,5 +1225,47 @@ document.addEventListener('DOMContentLoaded', () => {
     initPreviewPanel();
     initMetadataPanel();
     initBatchPanel();
-    updateHistoryBadge(); // show badge count on load from existing history
+    updateHistoryBadge();
+    initMobileNav();
+
+    // ── Mobile bottom nav ─────────────────────────────────────────────────────
+    function initMobileNav() {
+        const NAV = [
+            { btnId: 'mobileNavHome',    action: () => { closeAllPanels(); setActive('mobileNavHome'); window.scrollTo({top:0,behavior:'smooth'}); } },
+            { btnId: 'mobileNavPreview', panelId: 'previewPanel',  backdropId: 'previewBackdrop' },
+            { btnId: 'mobileNavHistory', panelId: 'historyPanel',  backdropId: 'historyBackdrop' },
+            { btnId: 'mobileNavMeta',    panelId: 'metaPanel',     backdropId: 'metaBackdrop'    },
+            { btnId: 'mobileNavBatch',   panelId: 'batchPanel',    backdropId: 'batchBackdrop'   },
+        ];
+
+        function setActive(activeId) {
+            NAV.forEach(({ btnId }) =>
+                document.getElementById(btnId)?.classList.toggle('active', btnId === activeId)
+            );
+        }
+
+        NAV.forEach(({ btnId, panelId, backdropId, action }) => {
+            const btn = document.getElementById(btnId);
+            if (!btn) return;
+            btn.addEventListener('click', () => {
+                if (action) { action(); return; }
+                const panel   = document.getElementById(panelId);
+                const isOpen  = panel && !panel.classList.contains('hidden');
+                closeAllPanels();
+                if (isOpen) {
+                    setActive('mobileNavHome');
+                } else {
+                    setActive(btnId);
+                    openPanel(panelId, backdropId);
+                    if (panelId === 'historyPanel') renderHistory();
+                }
+            });
+        });
+
+        PANELS.forEach(({ backdropId, closeId }) => {
+            document.getElementById(backdropId)?.addEventListener('click', () => setActive('mobileNavHome'));
+            document.getElementById(closeId)?.addEventListener('click',    () => setActive('mobileNavHome'));
+        });
+    }
+
 });

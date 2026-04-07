@@ -1,4 +1,3 @@
-@import url("https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700;800&family=Space+Mono:wght@400;700&display=swap");
 
 :root {
   --bg: #0a0a0a;
@@ -1908,3 +1907,354 @@ header {
     transition: opacity 0.2s;
 }
 .footer-source-link:hover { opacity: 0.7; text-decoration: underline; }
+/* ═══════════════════════════════════════════════════════════════════════════
+   MOBILE PWA — Native app feel (max-width: 599px)
+   Desktop styles above are completely untouched.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+@media (max-width: 599px) {
+
+  /* ── Base ── */
+  html { font-size: 15px; }
+
+  body {
+    padding: 0 0 100px; /* room for bottom nav */
+    /* Prevent elastic overscroll showing white flash */
+    overscroll-behavior: none;
+  }
+
+  /* ── Header — tighter, app-bar style ── */
+  header {
+    padding: 12px 16px;
+    padding-top: max(12px, env(safe-area-inset-top));
+    background: rgba(10,10,10,0.92);
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+
+  body.light-mode header {
+    background: rgba(240,244,255,0.95);
+  }
+
+  .logo-icon { width: 32px; height: 32px; border-radius: 9px; font-size: 0.9rem; }
+  .logo-text  { font-size: 1.1rem; }
+
+  /* Move panel buttons to a fixed bottom nav bar on mobile */
+  .panel-btns {
+    display: none; /* hidden from header on mobile */
+  }
+
+  /* Theme toggle stays in header but shrinks */
+  .theme-toggle-wrap { margin-left: auto; }
+
+  /* ── Bottom nav bar ── */
+  .mobile-bottom-nav {
+    display: flex;
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 500;
+    background: rgba(14,14,18,0.96);
+    backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
+    border-top: 1px solid var(--border);
+    padding: 8px 0;
+    padding-bottom: max(8px, env(safe-area-inset-bottom));
+    justify-content: space-around;
+    align-items: flex-end;
+  }
+
+  body.light-mode .mobile-bottom-nav {
+    background: rgba(240,244,255,0.96);
+  }
+
+  .mobile-nav-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 6px 16px;
+    border-radius: 12px;
+    color: var(--text-3);
+    font-family: var(--font-ui);
+    font-size: 0.6rem;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+    text-transform: uppercase;
+    transition: color 0.2s, background 0.2s;
+    position: relative;
+    min-width: 56px;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .mobile-nav-btn i {
+    font-size: 1.15rem;
+    transition: transform 0.2s cubic-bezier(0.34,1.56,0.64,1);
+  }
+
+  .mobile-nav-btn:active i {
+    transform: scale(0.85);
+  }
+
+  .mobile-nav-btn.active {
+    color: var(--blue);
+  }
+
+  .mobile-nav-btn .history-badge {
+    top: 2px;
+    right: 8px;
+  }
+
+  /* ── Container ── */
+  .container {
+    padding: 14px 14px 0;
+  }
+
+  /* ── Page hero — more compact on mobile ── */
+  .page-hero { margin-bottom: 14px; text-align: left; }
+
+  /* ── Input card ── */
+  .input-card {
+    padding: 14px;
+    border-radius: var(--radius-lg);
+    /* Subtle glow on focus to feel native */
+    transition: box-shadow 0.3s ease;
+  }
+
+  .input-card:focus-within {
+    box-shadow: 0 0 0 2px rgba(66,133,244,0.2), var(--shadow-md);
+  }
+
+  input[type="text"] {
+    font-size: 1rem; /* prevents iOS zoom on focus */
+    padding: 14px 40px 14px 44px;
+    border-radius: var(--radius);
+  }
+
+  .fetch-btn {
+    min-height: 50px;
+    border-radius: var(--radius);
+    font-size: 0.95rem;
+  }
+
+  /* ── Video card — full-width thumb on mobile ── */
+  .video-card {
+    padding: 0;
+    overflow: hidden;
+    border-radius: var(--radius-lg);
+    gap: 0;
+  }
+
+  .thumb-wrap {
+    width: 100%;
+    border-radius: 0;
+  }
+
+  .thumb-wrap img {
+    width: 100%;
+    height: 200px;
+    object-fit: cover;
+  }
+
+  .video-meta {
+    padding: 12px 14px 14px;
+  }
+
+  .video-meta h2 {
+    font-size: 0.95rem;
+    -webkit-line-clamp: 3;
+  }
+
+  .meta-channel { font-size: 0.75rem; }
+
+  /* ── Options section ── */
+  .options-section {
+    padding: 14px;
+    border-radius: var(--radius-lg);
+  }
+
+  .options-row {
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+
+  /* Larger tap targets on dropdowns */
+  .dropdown-selected {
+    height: 52px;
+    padding: 0 14px;
+    font-size: 0.95rem;
+    border-radius: var(--radius);
+  }
+
+  .dropdown-options div {
+    padding: 16px 14px;
+    font-size: 0.95rem;
+  }
+
+  /* ── Download button — big, thumb-friendly ── */
+  .download-btn {
+    min-height: 56px;
+    font-size: 1rem;
+    border-radius: var(--radius-lg);
+    letter-spacing: 0.2px;
+  }
+
+  /* ── Progress card ── */
+  .progress-card {
+    padding: 16px 14px;
+    border-radius: var(--radius-lg);
+  }
+
+  .progress-track { height: 7px; }
+
+  .download-success-btn {
+    min-height: 52px;
+    font-size: 0.95rem;
+    border-radius: var(--radius);
+  }
+
+  /* ── Panels — full bottom sheet on mobile ── */
+  .floating-panel {
+    border-radius: 20px 20px 0 0;
+    max-height: 90vh;
+    /* Pill handle */
+  }
+
+  .floating-panel::before {
+    content: '';
+    display: block;
+    width: 36px;
+    height: 4px;
+    background: var(--border2);
+    border-radius: 99px;
+    margin: 10px auto 0;
+    flex-shrink: 0;
+  }
+
+  .panel-header {
+    padding: 12px 16px 12px;
+    padding-top: 6px;
+  }
+
+  .panel-body {
+    padding: 14px 16px;
+    /* Momentum scrolling on iOS */
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* ── History items — bigger touch targets ── */
+  .history-item {
+    padding: 12px 14px;
+    border-radius: var(--radius);
+  }
+
+  .history-thumb { width: 64px; height: 40px; }
+
+  .history-dl-btn,
+  .history-del-btn {
+    width: 36px;
+    height: 36px;
+    border-radius: 10px;
+    font-size: 0.85rem;
+  }
+
+  /* ── Batch textarea ── */
+  .batch-textarea {
+    font-size: 0.9rem; /* prevent iOS zoom */
+    min-height: 120px;
+  }
+
+  /* ── Clean title row ── */
+  .clean-title-row { padding: 12px 14px; }
+
+  /* ── Filename preview ── */
+  .filename-preview { padding: 10px 12px; }
+  .filename-preview input { font-size: 0.78rem; }
+
+  /* ── Toggle switch — bigger on mobile ── */
+  .toggle-switch { width: 46px; height: 26px; }
+  .toggle-track::after { width: 20px; height: 20px; }
+  .toggle-switch input:checked + .toggle-track::after { transform: translateX(20px); }
+
+  /* ── ETA / expiry rows ── */
+  .eta-row, .expiry-row { font-size: 0.78rem; }
+
+  /* ── Hide page hero tagline, reduce heading sizes ── */
+  .page-title { font-size: 1.8rem; }
+  .page-sub   { font-size: 0.82rem; }
+
+  /* ── Drag overlay — disable on mobile (touch UX) ── */
+  .drag-overlay { display: none !important; }
+
+  /* ── Scrollbar — thinner on mobile ── */
+  ::-webkit-scrollbar { width: 3px; }
+}
+
+/* ── Mobile bottom nav — hidden on desktop ── */
+@media (min-width: 600px) {
+  .mobile-bottom-nav { display: none !important; }
+  .panel-btns { display: flex !important; }
+}
+
+/* ── PWA standalone mode — extra safe area handling ── */
+@media (display-mode: standalone) {
+  header {
+    padding-top: max(14px, env(safe-area-inset-top));
+  }
+  body {
+    padding-bottom: max(100px, calc(80px + env(safe-area-inset-bottom)));
+  }
+}
+
+/* ── Logo image (replaces gradient square) ───────────────────────────────── */
+.logo-icon-img {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  object-fit: cover;
+  flex-shrink: 0;
+  display: block;
+}
+
+@media (min-width: 720px) {
+  .logo-icon-img { width: 38px; height: 38px; }
+}
+
+/* ── AcoustID auto-tag badge ─────────────────────────────────────────────── */
+.acoustid-badge {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 10px;
+    padding: 10px 14px;
+    background: rgba(76, 201, 240, 0.07);
+    border: 1px solid rgba(76, 201, 240, 0.25);
+    border-radius: var(--radius);
+    font-size: 0.78rem;
+    font-family: var(--font-mono);
+    color: var(--text-2);
+    animation: fadeInUp 0.3s ease-out;
+}
+.acoustid-badge i {
+    color: var(--cyan);
+    font-size: 0.8rem;
+}
+.acoustid-badge strong {
+    color: var(--text);
+    font-weight: 600;
+}
+.acoustid-score {
+    font-size: 0.68rem;
+    color: var(--green);
+    background: rgba(52,168,83,0.1);
+    border: 1px solid rgba(52,168,83,0.25);
+    border-radius: var(--radius-pill);
+    padding: 1px 8px;
+}
