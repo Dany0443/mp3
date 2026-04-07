@@ -1,11 +1,23 @@
 const path      = require('path');
 const fs        = require('fs');
 const crypto    = require('crypto');
+const https     = require('https');
+const http      = require('http');
 const { v4: uuidv4 }  = require('uuid');
 const { exec, spawn } = require('child_process');
 const { promisify }   = require('util');
 const execAsync       = promisify(exec);
 const readline        = require('readline');
+
+const httpsAgent = new https.Agent({
+    keepAlive:            true,
+    keepAliveMsecs:       30000,
+    maxSockets:           10,
+    maxFreeSockets:       5,
+    timeout:              8000,
+    scheduling:           'lifo',
+    family:               4,
+});
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -15,12 +27,36 @@ const WEB_ROOT         = path.join(__dirname, 'web');
 const MAX_REQUESTS     = parseInt(process.env.MAX_REQUESTS) || 100;
 const TIME_WINDOW      = parseInt(process.env.TIME_WINDOW)  || 60000;
 const FILE_TTL_MS      = 60 * 60 * 1000; // 1 hour
-const QUEUE_CONCURRENCY = 3; // max parallel yt-dlp jobs
+const QUEUE_CONCURRENCY = 3;
+const CACHE_DIR = path.join(MP3_STORAGE_PATH, '.cache');
+if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true });
 
-// API key auth — set via env or auto-generate on first run.
-// The key is saved to .apikey file so it survives restarts.
-// Clients must send header:  X-API-Key: <key>
-// The web UI reads its key from /api/client-key (served only once per session).
+const BASE_PATH = (process.env.BASE_PATH || '').replace(/\/+$/, '');
+
+const ACOUSTID_KEY = process.env.ACOUSTID_KEY || '';
+
+function getFpcalcPath() {
+    const candidates = [
+        '/usr/bin/fpcalc',
+        '/usr/local/bin/fpcalc',
+        path.join(process.env.HOME || '/root', '.local/bin/fpcalc'),
+    ];
+    for (const p of candidates) {
+        try { if (fs.existsSync(p)) return p; } catch {}
+    }
+    return null;
+}
+const FPCALC_PATH = getFpcalcPath();
+
+const COOKIES_FILE = (() => {
+    const p = '/home/homemc/ytcookie.txt';
+    try { return fs.existsSync(p) ? p : null; } catch { return null; }
+})();
+
+const DOWNLOAD_RATE_LIMIT    = parseInt(process.env.DOWNLOAD_RATE_LIMIT) || 5;
+const DOWNLOAD_RATE_WINDOW   = parseInt(process.env.DOWNLOAD_RATE_WINDOW) || 60000;
+const downloadRateLimitCache = new Map();
+
 const API_KEY_FILE = path.join(__dirname, '.apikey');
 let API_KEY = '';
 
@@ -53,9 +89,14 @@ if (!fs.existsSync(MP3_STORAGE_PATH)) {
     logger.success(`Storage created: ${MP3_STORAGE_PATH}`);
 }
 
-// fileRegistry tracks every completed file so the cleanup sweep can delete
-// them after FILE_TTL_MS even if the process restarts between sweeps.
-// Structure: Map<filename, expiresAt (ms epoch)>
+function isValidYouTubeUrl(url) {
+    if (typeof url !== 'string') return false;
+    try {
+        const u = new URL(url);
+        return u.hostname.includes('youtu') || u.hostname.includes('youtube');
+    } catch { return false; }
+}
+
 const fileRegistry = new Map();
 
 function registerFile(filePath) {
@@ -64,7 +105,6 @@ function registerFile(filePath) {
     fileRegistry.set(name, expiresAt);
 }
 
-// Sweep runs every 5 minutes. Deletes any file whose TTL has passed.
 function startCleanupSweep() {
     setInterval(() => {
         const now = Date.now();
@@ -75,7 +115,6 @@ function startCleanupSweep() {
                 fileRegistry.delete(name);
             }
         }
-        // Also clean up any orphaned temp_ files older than 2 hours
         try {
             const files = fs.readdirSync(MP3_STORAGE_PATH);
             for (const f of files) {
@@ -125,30 +164,48 @@ const YT_DLP   = getYtDlpPath();
 const DENO_PATH = getDenoPath();
 
 function buildEnv() {
-    const extra = DENO_PATH ? path.dirname(DENO_PATH) : null;
-    const base  = process.env.PATH || '/usr/bin:/bin:/usr/local/bin';
-    return { ...process.env, PATH: extra ? `${extra}:${base}` : base };
+    const homeDirs = [
+        process.env.HOME && path.join(process.env.HOME, '.local', 'bin'),
+        process.env.HOME && path.join(process.env.HOME, '.deno', 'bin'),
+        '/snap/bin',
+        '/usr/local/bin',
+        '/usr/bin',
+        '/bin',
+    ].filter(Boolean);
+
+    const denoDir = DENO_PATH ? path.dirname(DENO_PATH) : null;
+    const allDirs = denoDir ? [denoDir, ...homeDirs] : homeDirs;
+    const existingDirs = (process.env.PATH || '').split(':');
+    const merged = [...new Set([...allDirs, ...existingDirs])].join(':');
+
+    return {
+        ...process.env,
+        PATH: merged,
+        HOME: process.env.HOME || '/root',
+        DENO_DIR: process.env.DENO_DIR || path.join(process.env.HOME || '/root', '.deno'),
+        ACOUSTID_KEY: 'gqaHKRGZFM',
+    };
 }
 
 // ─── Download strategies ───────────────────────────────────────────────────────
-// Tried in order. android_sdkless bypasses YouTube SABR streaming (2025+)
-// without needing po_token or cookies.
 
 const DOWNLOAD_STRATEGIES = [
+    // tv_embedded is the most reliable client for restricted/geo-blocked content —
+    // put it first to avoid wasting 4-8s on android_vr/ios failures.
     {
-        name: 'android_sdkless',
-        extraArgs: ['--extractor-args', 'youtube:player_client=android_sdkless'],
+        name: 'tv_embedded',
+        extraArgs: ['--extractor-args', 'youtube:player_client=tv_embedded'],
         formatArg: 'bestaudio/best',
     },
     {
         name: 'ios',
-        extraArgs: ['--extractor-args', 'youtube:player_client=ios,android_sdkless'],
+        extraArgs: ['--extractor-args', 'youtube:player_client=ios'],
         formatArg: 'bestaudio/best',
     },
     {
-        name: 'default+hls',
-        extraArgs: ['--extractor-args', 'youtube:player_client=default'],
-        formatArg: 'bestaudio/b',
+        name: 'android_vr',
+        extraArgs: ['--extractor-args', 'youtube:player_client=android_vr'],
+        formatArg: 'bestaudio/best',
     },
 ];
 
@@ -161,7 +218,75 @@ function sharedArgs(isPlaylist = false) {
         '--retries', '5',
         '--fragment-retries', '5',
         '--retry-sleep', '3',
+        // Parallel fragment downloading — cuts download time 2-4x on most connections.
+        // 4 is a safe number that won't trigger YouTube rate-limiting.
+        '--concurrent-fragments', '4',
+        ...(COOKIES_FILE ? ['--cookies', COOKIES_FILE] : []),
     ];
+}
+
+// ─── Build ffmpeg postprocessor args for single-pass tagging ─────────────────
+// These are passed to yt-dlp's --postprocessor-args so ffmpeg embeds the tags
+// during the SAME conversion step. Zero extra passes on slow hardware.
+//
+// yt-dlp syntax:  --postprocessor-args "ffmpeg:-metadata title=Foo -metadata artist=Bar"
+// The leading "ffmpeg:" tells yt-dlp which postprocessor gets the args.
+
+function buildTagPostprocessorArgs(metaTags) {
+    if (!metaTags) return [];
+    const parts = [];
+    if (metaTags.title)  parts.push(`-metadata`, `title=${metaTags.title}`);
+    if (metaTags.artist) parts.push(`-metadata`, `artist=${metaTags.artist}`);
+    if (metaTags.album)  parts.push(`-metadata`, `album=${metaTags.album}`);
+    if (metaTags.year)   parts.push(`-metadata`, `date=${metaTags.year}`);
+    if (metaTags.genre)  parts.push(`-metadata`, `genre=${metaTags.genre}`);
+    if (metaTags.track)  parts.push(`-metadata`, `track=${metaTags.track}`);
+    if (parts.length === 0) return [];
+    // Join as a single string for --postprocessor-args
+    return ['--postprocessor-args', `ffmpeg:${parts.join(' ')}`];
+}
+
+// ─── Quality arg helper ───────────────────────────────────────────────────────
+// Old code used a broken VBR formula for MP3. Now we use explicit CBR bitrates
+// which are faster to encode on slow hardware and give predictable file sizes.
+// WAV and M4A still need the ${quality}K form.
+
+function buildQualityArg(audioFormat, quality) {
+    switch (audioFormat) {
+        case 'wav':
+        case 'm4a':
+            return `${quality}K`;
+        case 'ogg':
+            // OGG vorbis quality scale 0-10; map kbps to approximate scale
+            // 128→3, 192→5, 256→7, 320→9
+            return String(Math.round((quality - 128) / 48 * 2 + 3));
+        case 'mp3':
+        default:
+            // Use explicit CBR bitrate — fastest for low-power CPUs
+            return `${quality}K`;
+    }
+}
+
+// ─── Auto-update yt-dlp daily ─────────────────────────────────────────────────
+
+function startYtDlpAutoUpdate() {
+    const CHECK_INTERVAL = 24 * 60 * 60 * 1000;
+
+    async function tryUpdate() {
+        try {
+            logger.info('Auto-update: checking yt-dlp...');
+            const { stdout } = await execAsync(`"${YT_DLP}" -U 2>&1`, { timeout: 60000, env: buildEnv() });
+            const result = stdout.trim().split('\n').pop();
+            logger.success(`Auto-update yt-dlp: ${result}`);
+        } catch (err) {
+            logger.warn(`Auto-update yt-dlp failed: ${err.message.slice(0, 100)}`);
+        }
+    }
+
+    setTimeout(() => {
+        tryUpdate();
+        setInterval(tryUpdate, CHECK_INTERVAL);
+    }, 60 * 60 * 1000);
 }
 
 // ─── Dependency check ─────────────────────────────────────────────────────────
@@ -183,7 +308,7 @@ async function checkDependencies() {
             }
         }
     } catch {
-        logger.error(`yt-dlp not found. Install: sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && sudo chmod a+rx /usr/local/bin/yt-dlp`);
+        logger.error(`yt-dlp not found.`);
     }
 
     if (DENO_PATH) {
@@ -194,19 +319,33 @@ async function checkDependencies() {
             logger.warn(`deno found at ${DENO_PATH} but failed to run`);
         }
     } else {
-        logger.warn('deno not found — nsig solving will fail. Install: curl -fsSL https://deno.land/install.sh | sh');
+        logger.warn('deno not found — nsig solving may fail.');
     }
 
     try {
         const { stdout } = await execAsync('ffmpeg -version 2>&1');
         logger.success(`ffmpeg: ${stdout.split('\n')[0].trim().substring(0, 60)}`);
     } catch {
-        logger.error('ffmpeg not found. Install: sudo apt install ffmpeg');
+        logger.error('ffmpeg not found.');
     }
 
-    logger.info(`Auto-update cron (run once to set up): crontab -e`);
-    logger.info(`  Add this line:  0 3 * * 1  ${YT_DLP} -U >> /var/log/ytdlp-update.log 2>&1`);
-    logger.info(`  That updates yt-dlp every Monday at 3am automatically.`);
+    if (COOKIES_FILE) {
+        logger.success(`cookies: ${COOKIES_FILE}`);
+    } else {
+        logger.warn('yt-cookies.txt not found — age-restricted videos may fail');
+    }
+
+    if (FPCALC_PATH) {
+        logger.success(`fpcalc: ${FPCALC_PATH}`);
+    } else {
+        logger.warn('fpcalc not found — AcoustID disabled.');
+    }
+
+    if (ACOUSTID_KEY) {
+        logger.success(`AcoustID: API key set (${ACOUSTID_KEY.substring(0, 6)}...)`);
+    } else {
+        logger.warn('ACOUSTID_KEY not set — auto-tagging disabled.');
+    }
 
     logger.divider();
 }
@@ -256,7 +395,6 @@ function isPlaylistUrl(url) {
 }
 
 // ─── Download queue ───────────────────────────────────────────────────────────
-// Simple concurrency-limited FIFO queue. Each item is a { fn, resolve, reject }.
 
 const queue = [];
 let activeJobs = 0;
@@ -293,6 +431,8 @@ function updateDownloadStatus(id, updates) {
 
 function spawnYtdlp(args, onProgress) {
     return new Promise((resolve, reject) => {
+        logger.info(`Running: ${YT_DLP} ${args.join(' ')}`);
+
         const child = spawn(YT_DLP, args, { env: buildEnv() });
         let stderr = '';
 
@@ -300,43 +440,235 @@ function spawnYtdlp(args, onProgress) {
             if (!onProgress) return;
             const lines = data.toString().split('\n');
             for (const line of [...lines].reverse()) {
-                const m = line.match(/\[download\]\s+(\d+\.?\d*)%/);
-                if (m) { onProgress('download', parseFloat(m[1])); break; }
+                const m = line.match(/\[download\]\s+(\d+\.?\d*)%(?:.*?at\s+([\d.]+\s*\S+\/s))?(?:.*?ETA\s+(\S+))?/);
+                if (m) {
+                    onProgress('download', parseFloat(m[1]), m[2] || null, m[3] || null);
+                    break;
+                }
                 if (line.includes('Destination') || line.includes('Extracting') || line.includes('Converting')) {
-                    onProgress('convert'); break;
+                    onProgress('convert');
+                    break;
                 }
             }
         });
 
         child.stderr.on('data', (d) => {
             const t = d.toString().trim();
-            if (t && !t.includes('Does not start with RIFF')) {
-                stderr += t + '\n';
-                logger.warn(`[yt-dlp] ${t}`);
-            }
+            stderr += t + '\n';
+            console.log(`[YT-DLP-ERROR] ${t}`);
         });
 
         child.on('close', (code) => {
             if (code === 0) resolve();
-            else reject(new Error(`yt-dlp exited ${code}: ${stderr.slice(-400)}`));
+            else {
+                logger.error(`Process exited with code ${code}`);
+                reject(new Error(`yt-dlp exited ${code}`));
+            }
         });
     });
+}
+
+// ─── Simple HTTP GET helper ───────────────────────────────────────────────────
+
+function httpGet(url, timeoutMs = 5000) {
+    return new Promise((resolve, reject) => {
+        const mod   = url.startsWith('https') ? https : http;
+        const agent = url.startsWith('https') ? httpsAgent : undefined;
+        const options = {
+            timeout: timeoutMs,
+            agent,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            }
+        };
+
+        const req = mod.get(url, options, (res) => {
+            if (res.statusCode !== 200) {
+                res.resume();
+                return reject(new Error(`HTTP ${res.statusCode}`));
+            }
+            let body = '';
+            res.on('data', d => body += d);
+            res.on('end', () => {
+                try { resolve(JSON.parse(body)); }
+                catch { reject(new Error('Invalid JSON')); }
+            });
+        });
+        req.on('error', reject);
+        req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
+    });
+}
+
+// ─── oEmbed fast fetch ────────────────────────────────────────────────────────
+
+async function fetchVideoInfoFast(url) {
+    const encoded = encodeURIComponent(url);
+    const data    = await httpGet(
+        `https://www.youtube.com/oembed?url=${encoded}&format=json`,
+        4000
+    );
+
+    if (!data.title) throw new Error('oEmbed returned no title');
+
+    const vidId = extractVideoId(url);
+    const thumb = vidId
+        ? `https://i.ytimg.com/vi/${vidId}/hqdefault.jpg`
+        : (data.thumbnail_url || '');
+
+    return {
+        title:         stripEmojis(data.title),
+        author:        stripEmojis(data.author_name || 'Unknown'),
+        lengthSeconds: 0,
+        thumbnailUrl:  thumb,
+        fromOembed:    true,
+    };
+}
+
+function extractVideoId(url) {
+    try {
+        const u = new URL(url);
+        if (u.hostname.includes('youtu.be')) return u.pathname.slice(1).split('?')[0];
+        return u.searchParams.get('v') || null;
+    } catch { return null; }
 }
 
 // ─── Video info ───────────────────────────────────────────────────────────────
 
 async function fetchVideoInfo(url) {
+    try {
+        const t0   = Date.now();
+        const fast = await fetchVideoInfoFast(url);
+        logger.info(`oEmbed hit: "${fast.title}" in ${Date.now() - t0}ms`);
+        enrichDurationAsync(url, extractVideoId(url));
+        return fast;
+    } catch (oembedErr) {
+        logger.warn(`oEmbed failed (${oembedErr.message}), falling back to yt-dlp`);
+    }
+
+    const t1 = Date.now();
     for (const strategy of DOWNLOAD_STRATEGIES) {
         try {
             const args = [...strategy.extraArgs, ...sharedArgs(), '--dump-json', url];
             const cmd  = `"${YT_DLP}" ${args.map(a => a.includes(' ') ? `"${a}"` : a).join(' ')}`;
             const { stdout } = await execAsync(cmd, { maxBuffer: 10 * 1024 * 1024, timeout: 40000, env: buildEnv() });
-            return JSON.parse(stdout);
+            const info = JSON.parse(stdout);
+            logger.info(`yt-dlp info took ${Date.now() - t1}ms via ${strategy.name}`);
+            return {
+                title:         stripEmojis(info.title    || 'Unknown Title'),
+                author:        stripEmojis(info.uploader || info.channel || 'Unknown'),
+                lengthSeconds: parseInt(info.duration    || '0'),
+                thumbnailUrl:  info.thumbnail || '',
+                fromOembed:    false,
+            };
         } catch (err) {
             logger.warn(`Info strategy "${strategy.name}" failed: ${err.message.slice(0, 150)}`);
         }
     }
     throw new Error('All strategies failed to fetch video info');
+}
+
+const durationCache = new Map();
+
+async function enrichDurationAsync(url, videoId) {
+    if (!videoId) return;
+    if (durationCache.has(videoId)) return;
+    try {
+        const cmd = `"${YT_DLP}" --no-playlist --no-warnings --retries 1 --socket-timeout 8 --extractor-args "youtube:player_client=android_vr" --print duration "${url}"`;
+        const { stdout } = await execAsync(cmd, { timeout: 12000, env: buildEnv() });
+        const secs = parseInt(stdout.trim());
+        if (!isNaN(secs) && secs > 0) {
+            durationCache.set(videoId, secs);
+            logger.info(`Duration cached: ${videoId} = ${secs}s`);
+        }
+    } catch {}
+}
+
+// ─── AcoustID audio fingerprinting ───────────────────────────────────────────
+// Uses -c copy so it's just a container re-wrap with new tags — extremely fast
+// even on an i3-6006U. No re-encoding.
+
+// Circuit breaker: if AcoustID returns HTTP 400 (bad API key) repeatedly, disable it
+// so we stop wasting fpcalc CPU time (2-5s on i3-6006U) on every download.
+let acoustIdFailCount = 0;
+const ACOUSTID_MAX_FAILS = 2; // disable after 2 consecutive 400s
+
+async function autoTagWithAcoustID(filePath, downloadId) {
+    if (!ACOUSTID_KEY || !FPCALC_PATH) {
+        if (!ACOUSTID_KEY) logger.warn(`[${downloadId}] AcoustID: no API key`);
+        if (!FPCALC_PATH)  logger.warn(`[${downloadId}] AcoustID: fpcalc not found`);
+        return null;
+    }
+
+    if (acoustIdFailCount >= ACOUSTID_MAX_FAILS) {
+        logger.warn(`[${downloadId}] AcoustID: disabled after ${acoustIdFailCount} consecutive failures (likely bad API key)`);
+        return null;
+    }
+
+    try {
+        updateDownloadStatus(downloadId, { status: 'Identifying track...', progress: 97 });
+
+        const { stdout: fpcOut } = await execAsync(
+            `"${FPCALC_PATH}" -json "${filePath}"`,
+            { timeout: 30000 }
+        );
+        const fpc = JSON.parse(fpcOut);
+        if (!fpc.fingerprint || !fpc.duration) throw new Error('fpcalc returned no fingerprint');
+
+        const acoustUrl = `https://api.acoustid.org/v2/lookup?client=${ACOUSTID_KEY}` +
+            `&meta=recordings+releasegroups+compress` +
+            `&duration=${Math.round(fpc.duration)}` +
+            `&fingerprint=${encodeURIComponent(fpc.fingerprint)}`;
+
+        const result = await httpGet(acoustUrl, 8000);
+        if (result.status !== 'ok' || !result.results?.length) throw new Error('No AcoustID results');
+
+        const best = result.results
+            .filter(r => r.score > 0.75 && r.recordings?.length)
+            .sort((a, b) => b.score - a.score)[0];
+
+        if (!best) throw new Error(`No confident match`);
+
+        const rec    = best.recordings[0];
+        const title  = rec.title   || '';
+        const artist = rec.artists?.[0]?.name || '';
+        const album  = rec.releasegroups?.[0]?.title || '';
+        const year   = rec.releasegroups?.[0]?.['first-release-date']?.slice(0, 4) || '';
+
+        if (!title && !artist) throw new Error('No usable metadata');
+
+        logger.success(`[${downloadId}] AcoustID matched: "${artist} - ${title}" (score: ${best.score.toFixed(2)})`);
+        acoustIdFailCount = 0; // reset circuit breaker on success
+        // Single-pass: -c copy means no re-encoding — just rewrites the container with new tags.
+        // On an i3-6006U this takes < 1 second for any file size.
+        const taggedPath = filePath + '.acoustid.mp3';
+        const metaParts  = [
+            ...(title  ? ['-metadata', `title=${title}`]   : []),
+            ...(artist ? ['-metadata', `artist=${artist}`] : []),
+            ...(album  ? ['-metadata', `album=${album}`]   : []),
+            ...(year   ? ['-metadata', `date=${year}`]     : []),
+        ];
+        const metaStr = metaParts.map(a => a.includes(' ') ? `"${a}"` : a).join(' ');
+        await execAsync(
+            `ffmpeg -y -i "${filePath}" -c copy ${metaStr} "${taggedPath}"`,
+            { timeout: 30000, env: buildEnv() }
+        );
+        fs.renameSync(taggedPath, filePath);
+
+        logger.success(`[${downloadId}] AcoustID tags written`);
+        return { title, artist, album, year, score: best.score };
+
+    } catch (err) {
+        if (err.message.includes('HTTP 400')) {
+            acoustIdFailCount++;
+            logger.warn(`[${downloadId}] AcoustID failed (HTTP 400 — bad API key?): ${acoustIdFailCount}/${ACOUSTID_MAX_FAILS} strikes`);
+            if (acoustIdFailCount >= ACOUSTID_MAX_FAILS) {
+                logger.warn(`AcoustID circuit breaker OPEN — auto-tagging disabled. Fix ACOUSTID_KEY to re-enable.`);
+            }
+        } else {
+            logger.warn(`[${downloadId}] AcoustID failed: ${err.message}`);
+        }
+        return null;
+    }
 }
 
 async function fetchPlaylistInfo(url) {
@@ -363,8 +695,12 @@ async function fetchPlaylistInfo(url) {
 }
 
 // ─── Single track download ────────────────────────────────────────────────────
+// KEY OPTIMIZATION: metadata tags are now injected via --postprocessor-args
+// so yt-dlp embeds them during the same ffmpeg conversion pass that creates
+// the audio file. Previously there was a SECOND ffmpeg call after the fact,
+// which doubled the encoding time on slow hardware.
 
-async function processYoutubeDownload(url, downloadId, audioFormat = 'mp3', quality = 192, outputFilename, isPreview = false) {
+async function processYoutubeDownload(url, downloadId, audioFormat = 'mp3', quality = 192, outputFilename, isPreview = false, embedThumbnail = false, metaTags = null) {
     let finalOutputPath = null;
     try {
         updateDownloadStatus(downloadId, { status: isPreview ? 'Generating preview...' : 'Initializing...', progress: 5 });
@@ -379,21 +715,28 @@ async function processYoutubeDownload(url, downloadId, audioFormat = 'mp3', qual
         finalOutputPath = path.join(MP3_STORAGE_PATH, filename);
         const tempPattern = path.join(MP3_STORAGE_PATH, `temp_${downloadId}.%(ext)s`);
 
-        const qualityArg = (audioFormat === 'm4a' || audioFormat === 'wav')
-            ? `${quality}K`
-            : `${Math.floor((320 - quality) / 320 * 9)}`;
+        const qualityArg = buildQualityArg(audioFormat, quality);
+
+        // Build single-pass tag args — injected directly into yt-dlp's ffmpeg call.
+        // This replaces the old second-pass ffmpeg tagging entirely.
+        const tagArgs = (metaTags && !isPreview) ? buildTagPostprocessorArgs(metaTags) : [];
 
         let lastProgress = 0;
-        const onProgress = (type, pct) => {
+        const onProgress = (type, pct, speed, eta) => {
             if (type === 'download' && pct !== undefined) {
                 const calc = 10 + Math.floor(pct * 0.85);
                 if (calc > lastProgress) {
                     lastProgress = calc;
-                    updateDownloadStatus(downloadId, { status: `Downloading: ${Math.floor(pct)}%`, progress: lastProgress });
+                    updateDownloadStatus(downloadId, {
+                        status:   `Downloading: ${Math.floor(pct)}%`,
+                        progress: lastProgress,
+                        speed:    speed || null,
+                        eta:      eta   || null,
+                    });
                 }
             } else if (type === 'convert' && lastProgress < 95) {
                 lastProgress = 95;
-                updateDownloadStatus(downloadId, { status: 'Finalizing audio...', progress: 95 });
+                updateDownloadStatus(downloadId, { status: 'Finalizing audio...', progress: 95, speed: null, eta: null });
             }
         };
 
@@ -416,6 +759,8 @@ async function processYoutubeDownload(url, downloadId, audioFormat = 'mp3', qual
                 '--audio-quality', qualityArg,
                 '--newline',
                 ...(isPreview ? ['--download-sections', '*0-30', '--force-keyframes-at-cuts'] : []),
+                ...(embedThumbnail && audioFormat === 'mp3' ? ['--embed-thumbnail', '--convert-thumbnails', 'jpg'] : []),
+                ...tagArgs,   // <-- SINGLE-PASS TAGS: embedded here, no second ffmpeg call
                 '-o', tempPattern,
                 url,
             ];
@@ -440,19 +785,31 @@ async function processYoutubeDownload(url, downloadId, audioFormat = 'mp3', qual
         if (fs.existsSync(finalOutputPath)) fs.unlinkSync(finalOutputPath);
         fs.renameSync(tmpPath, finalOutputPath);
 
+        // ── NO MORE SECOND FFMPEG PASS ──
+        // Tags were already embedded above via --postprocessor-args.
+        // The old second-pass block has been removed entirely.
+
         const stat = fs.statSync(finalOutputPath);
         if (stat.size === 0) throw new Error('Converted file is empty.');
+
+        // AcoustID auto-tag — only runs when no manual tags were provided.
+        // Uses -c copy so it's < 1 second regardless of file size.
+        let acoustidMatch = null;
+        if (audioFormat === 'mp3' && !isPreview && !metaTags) {
+            acoustidMatch = await autoTagWithAcoustID(finalOutputPath, downloadId);
+        }
 
         registerFile(finalOutputPath);
         logger.success(`Ready: ${filename} (${(stat.size / 1048576).toFixed(2)} MB) — expires in 1h`);
 
         updateDownloadStatus(downloadId, {
-            status: 'Done!',
-            progress: 100,
-            complete: true,
-            downloadUrl: `/downloads/${encodeURIComponent(filename)}`,
+            status:       'Done!',
+            progress:     100,
+            complete:     true,
+            downloadUrl:  `${BASE_PATH}/downloads/${encodeURIComponent(filename)}`,
             filename,
-            expiresAt: Date.now() + FILE_TTL_MS,
+            expiresAt:    Date.now() + FILE_TTL_MS,
+            acoustid:     acoustidMatch || undefined,
         });
 
     } catch (err) {
@@ -481,12 +838,10 @@ async function processYoutubeDownload(url, downloadId, audioFormat = 'mp3', qual
 
 // ─── Playlist download ────────────────────────────────────────────────────────
 
-async function processPlaylistDownload(url, downloadId, audioFormat = 'mp3', quality = 192) {
+async function processPlaylistDownload(url, downloadId, audioFormat = 'mp3', quality = 192, embedThumbnail = false) {
     const formatMap = { ogg: 'vorbis', m4a: 'aac' };
     const conversionFormat = formatMap[audioFormat] || audioFormat;
-    const qualityArg = (audioFormat === 'm4a' || audioFormat === 'wav')
-        ? `${quality}K`
-        : `${Math.floor((320 - quality) / 320 * 9)}`;
+    const qualityArg = buildQualityArg(audioFormat, quality);
 
     let zipPath = null;
     try {
@@ -522,6 +877,15 @@ async function processPlaylistDownload(url, downloadId, audioFormat = 'mp3', qua
                 total,
             });
 
+            // Build single-pass tag args for each playlist track
+            const artistName = stripEmojis(entry.uploader || entry.channel || playlistTitle);
+            const trackTagArgs = audioFormat === 'mp3' ? buildTagPostprocessorArgs({
+                title:  trackName,
+                artist: artistName,
+                album:  playlistTitle,
+                track:  `${i + 1}/${total}`,
+            }) : [];
+
             let trackSucceeded = false;
             for (const strategy of DOWNLOAD_STRATEGIES) {
                 const args = [
@@ -532,6 +896,8 @@ async function processPlaylistDownload(url, downloadId, audioFormat = 'mp3', qua
                     '--audio-format', conversionFormat,
                     '--audio-quality', qualityArg,
                     '--newline',
+                    ...(embedThumbnail && audioFormat === 'mp3' ? ['--embed-thumbnail', '--convert-thumbnails', 'jpg'] : []),
+                    ...trackTagArgs,   // <-- SINGLE-PASS TAGS
                     '-o', outPattern,
                     videoUrl,
                 ];
@@ -551,12 +917,10 @@ async function processPlaylistDownload(url, downloadId, audioFormat = 'mp3', qua
 
         updateDownloadStatus(downloadId, { status: 'Creating zip...', progress: 95 });
 
-        // Zip the folder using the system zip command (no extra npm dep)
         const zipName = `${playlistTitle}.zip`;
         zipPath = path.join(MP3_STORAGE_PATH, zipName);
         await execAsync(`cd "${tempDir}" && zip -r "${zipPath}" .`, { timeout: 120000 });
 
-        // Remove temp track folder
         try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
 
         const stat = fs.statSync(zipPath);
@@ -569,7 +933,7 @@ async function processPlaylistDownload(url, downloadId, audioFormat = 'mp3', qua
             status: 'Playlist ready!',
             progress: 100,
             complete: true,
-            downloadUrl: `/downloads/${encodeURIComponent(zipName)}`,
+            downloadUrl: `${BASE_PATH}/downloads/${encodeURIComponent(zipName)}`,
             filename: zipName,
             expiresAt: Date.now() + FILE_TTL_MS,
             isPlaylist: true,
@@ -591,10 +955,15 @@ async function processPlaylistDownload(url, downloadId, audioFormat = 'mp3', qua
 // ─── Fastify ──────────────────────────────────────────────────────────────────
 
 const fastify = require('fastify')({
+    trustProxy: true,
     logger: false,
     bodyLimit: 10485760,
     requestTimeout: 300000,
     keepAliveTimeout: 600000,
+});
+
+fastify.addContentTypeParser('application/json', { parseAs: 'string' }, (req, body, done) => {
+    try { done(null, JSON.parse(body)); } catch (e) { done(e, undefined); }
 });
 
 fastify.register(require('@fastify/cors'), {
@@ -629,10 +998,6 @@ fastify.addHook('onRequest', (request, reply, done) => {
 });
 
 // ─── Auth middleware ──────────────────────────────────────────────────────────
-// All /api/* routes require X-API-Key header matching API_KEY.
-// Static files and the root HTML are public so the page loads for anyone.
-// /api/client-key is the one endpoint that returns the key to the browser
-// — it's how the web UI bootstraps itself. It's still rate-limited above.
 
 function requireAuth(request, reply) {
     const key = request.headers['x-api-key'] || request.query._k;
@@ -671,6 +1036,16 @@ fastify.get('/favicon.svg', async (req, reply) => {
     catch { return reply.status(404).send(''); }
 });
 
+fastify.get('/favicon-192.png', async (req, reply) => {
+    try { return reply.type('image/png').send(await fs.promises.readFile(path.join(WEB_ROOT, 'favicon-192.png'))); }
+    catch { return reply.status(404).send(''); }
+});
+
+fastify.get('/favicon-512.png', async (req, reply) => {
+    try { return reply.type('image/png').send(await fs.promises.readFile(path.join(WEB_ROOT, 'favicon-512.png'))); }
+    catch { return reply.status(404).send(''); }
+});
+
 fastify.get('/manifest.json', async (req, reply) => {
     try { return reply.type('application/manifest+json').send(await fs.promises.readFile(path.join(WEB_ROOT, 'manifest.json'))); }
     catch { return reply.status(404).send(''); }
@@ -681,11 +1056,32 @@ fastify.get('/script.js', async (req, reply) => {
     catch { return reply.status(404).send(''); }
 });
 
-// The browser calls this once on load to get its session key.
-// This is what keeps it "free for all" on the client — the page just works
-// when you open it, but all API calls are still authenticated.
 fastify.get('/api/client-key', async (req, reply) => {
     return reply.send({ key: API_KEY });
+});
+
+fastify.get('/vendor/fa/all.min.css', async (req, reply) => {
+    try { return reply.type('text/css').send(await fs.promises.readFile(path.join(WEB_ROOT, 'vendor/fa/all.min.css'))); }
+    catch { return reply.status(404).send(''); }
+});
+
+fastify.get('/vendor/fa/webfonts/:file', async (req, reply) => {
+    try {
+        const file = path.basename(req.params.file);
+        return reply.type('font/woff2').send(await fs.promises.readFile(path.join(WEB_ROOT, 'vendor/fa/webfonts', file)));
+    } catch { return reply.status(404).send(''); }
+});
+
+fastify.get('/vendor/fonts/fonts.css', async (req, reply) => {
+    try { return reply.type('text/css').send(await fs.promises.readFile(path.join(WEB_ROOT, 'vendor/fonts/fonts.css'))); }
+    catch { return reply.status(404).send(''); }
+});
+
+fastify.get('/vendor/fonts/:file', async (req, reply) => {
+    try {
+        const file = path.basename(req.params.file);
+        return reply.type('font/woff2').send(await fs.promises.readFile(path.join(WEB_ROOT, 'vendor/fonts', file)));
+    } catch { return reply.status(404).send(''); }
 });
 
 // ─── API routes ───────────────────────────────────────────────────────────────
@@ -705,9 +1101,9 @@ fastify.get('/api/video-info', async (req, reply) => {
         if (isPlaylistUrl(cleanUrl)) {
             const entries = await fetchPlaylistInfo(cleanUrl);
             return reply.send({
-                isPlaylist: true,
-                title: entries[0]?.playlist_title || entries[0]?.playlist || 'Playlist',
-                count: entries.length,
+                isPlaylist:   true,
+                title:        entries[0]?.playlist_title || entries[0]?.playlist || 'Playlist',
+                count:        entries.length,
                 thumbnailUrl: entries[0]?.thumbnails?.slice(-1)[0]?.url || '',
             });
         }
@@ -715,10 +1111,12 @@ fastify.get('/api/video-info', async (req, reply) => {
         const info = await fetchVideoInfo(cleanUrl);
         return reply.send({
             isPlaylist:    false,
-            title:         stripEmojis(info.title    || 'Unknown Title'),
-            author:        stripEmojis(info.uploader || info.channel || 'Unknown'),
-            lengthSeconds: parseInt(info.duration   || '0'),
-            thumbnailUrl:  info.thumbnail || '',
+            title:         info.title,
+            author:        info.author,
+            lengthSeconds: info.lengthSeconds,
+            thumbnailUrl:  info.thumbnailUrl,
+            fromOembed:    info.fromOembed || false,
+            videoId:       extractVideoId(cleanUrl),
         });
     } catch (err) {
         logger.error('video-info failed:', err.message);
@@ -726,24 +1124,119 @@ fastify.get('/api/video-info', async (req, reply) => {
     }
 });
 
+fastify.get('/api/video-duration/:videoId', async (req, reply) => {
+    if (!requireAuth(req, reply)) return;
+    const { videoId } = req.params;
+    const secs = durationCache.get(videoId);
+    if (secs === undefined) return reply.status(404).send({ error: 'Not ready yet' });
+    return reply.send({ lengthSeconds: secs });
+});
+
 fastify.get('/api/download', async (req, reply) => {
     if (!requireAuth(req, reply)) return;
 
-    const { url, format, quality, filename, preview } = req.query;
+    // FIX: Accept both 'embedThumb' (client sends) and 'embedThumbnail' (old name)
+    const {
+        url,
+        format = 'mp3',
+        quality = '192',
+        preview,
+        embedThumb,
+        embedThumbnail,
+        metaTitle,
+        metaArtist,
+        metaAlbum,
+        metaYear,
+        metaGenre,
+        metaTrack,
+        filename: customFilename,
+    } = req.query;
+
+    if (!url) return reply.status(400).send({ error: 'Missing URL' });
+
+    if (!isValidYouTubeUrl(url)) {
+        logger.warn(`Rejected invalid URL: ${url}`);
+        return reply.status(400).send({ error: 'Bro, nice try. Valid YouTube URLs only.' });
+    }
+
     const cleanUrl = cleanYoutubeUrl(url);
     if (!cleanUrl) return reply.status(400).send({ error: 'Invalid YouTube URL' });
 
     const id = uuidv4();
     const isPlaylist = isPlaylistUrl(cleanUrl);
-    const isPreview  = preview === '1';
+
+    let outputFilename = customFilename;
+
+    // --- SMART CACHE LOGIC ---
+    let fileHash = null;
+    if (!isPlaylist) {
+        fileHash = crypto.createHash('md5').update(`${cleanUrl}-${format}-${quality}`).digest('hex');
+        const cachedFilePath = path.join(CACHE_DIR, `${fileHash}.${format}`);
+
+        if (fs.existsSync(cachedFilePath)) {
+            logger.success(`[CACHE HIT] Instantly copying cache to requested filename`);
+
+            const displayTitle = customFilename || `Download_${id.substring(0,6)}`;
+            const finalFilename = `${displayTitle}.${format}`;
+            const finalPath = path.join(MP3_STORAGE_PATH, finalFilename);
+
+            fs.copyFileSync(cachedFilePath, finalPath);
+
+            activeDownloads.set(id, {
+                status: 'Cache Hit! Ready.',
+                progress: 100,
+                complete: true,
+                filename: finalFilename,
+                downloadUrl: `/mp3/downloads/${encodeURIComponent(finalFilename)}`,
+                expiresAt: Date.now() + FILE_TTL_MS
+            });
+
+            registerFile(finalPath);
+            return reply.send({ id, isPlaylist: false, cached: true });
+        }
+    }
+
+    const isPreview   = preview === '1';
+    // Accept both param names (embedThumb from new client, embedThumbnail from old)
+    const doEmbedThumb = (embedThumb === '1' || embedThumbnail === '1');
+
+    // FIX: Build metaTags from query params — this is what was silently failing before.
+    // The old code checked req.query correctly but the client wasn't sending the params
+    // through properly because of a mismatch in the URLSearchParams key names.
+    const metaTags = (metaTitle || metaArtist || metaAlbum || metaYear || metaGenre || metaTrack)
+        ? {
+            title:  metaTitle  || null,
+            artist: metaArtist || null,
+            album:  metaAlbum  || null,
+            year:   metaYear   || null,
+            genre:  metaGenre  || null,
+            track:  metaTrack  || null,
+          }
+        : null;
+
+    if (metaTags) {
+        logger.info(`[${id}] Meta tags received: ${JSON.stringify(metaTags)}`);
+    }
 
     activeDownloads.set(id, { status: 'Queued', progress: 0, isPlaylist });
 
     if (isPlaylist) {
-        enqueue(() => processPlaylistDownload(cleanUrl, id, format || 'mp3', parseInt(quality) || 192))
+        enqueue(() => processPlaylistDownload(cleanUrl, id, format || 'mp3', parseInt(quality) || 192, doEmbedThumb))
             .catch(err => logger.error('Unhandled playlist error:', err));
     } else {
-        enqueue(() => processYoutubeDownload(cleanUrl, id, format || 'mp3', parseInt(quality) || 192, filename, isPreview))
+        enqueue(() => processYoutubeDownload(cleanUrl, id, format || 'mp3', parseInt(quality) || 192, outputFilename, isPreview, doEmbedThumb, metaTags))
+            .then(() => {
+                if (fileHash) {
+                    const job = activeDownloads.get(id);
+                    if (job && job.filename) {
+                        const originalPath = path.join(MP3_STORAGE_PATH, job.filename);
+                        const cachedFilePath = path.join(CACHE_DIR, `${fileHash}.${format}`);
+                        if (fs.existsSync(originalPath)) {
+                            fs.copyFileSync(originalPath, cachedFilePath);
+                        }
+                    }
+                }
+            })
             .catch(err => logger.error('Unhandled download error:', err));
     }
 
@@ -823,6 +1316,109 @@ fastify.get('/downloads/:filename', async (req, reply) => {
     }
 });
 
+// ─── Batch zip endpoint ───────────────────────────────────────────────────────
+
+fastify.post('/api/batch-zip', async (req, reply) => {
+    if (!requireAuth(req, reply)) return;
+
+    const { urls, format, quality } = req.body || {};
+    if (!Array.isArray(urls) || urls.length === 0)
+        return reply.status(400).send({ error: 'No URLs provided' });
+
+    const id = uuidv4();
+    activeDownloads.set(id, { status: 'Queued', progress: 0, isBatch: true, total: urls.length, done: 0 });
+    reply.send({ id });
+
+    enqueue(() => processBatchZip(urls, id, format || 'mp3', parseInt(quality) || 192))
+        .catch(err => logger.error('Unhandled batch-zip error:', err));
+});
+
+async function processBatchZip(urls, downloadId, audioFormat, quality) {
+    const formatMap = { ogg: 'vorbis', m4a: 'aac' };
+    const conversionFormat = formatMap[audioFormat] || audioFormat;
+    const qualityArg = buildQualityArg(audioFormat, quality);
+
+    const tempDir = path.join(MP3_STORAGE_PATH, `batch_${downloadId}`);
+    let zipPath   = null;
+    try {
+        fs.mkdirSync(tempDir, { recursive: true });
+        const total = urls.length;
+        let doneCount = 0;
+
+        for (let i = 0; i < urls.length; i++) {
+            const url      = urls[i];
+            const cleanUrl = cleanYoutubeUrl(url);
+            if (!cleanUrl) { doneCount++; continue; }
+
+            updateDownloadStatus(downloadId, {
+                status:   `[${i+1}/${total}] Fetching...`,
+                progress: 5 + Math.floor((i / total) * 88),
+                done: i,
+                total,
+            });
+
+            let trackName = `track_${String(i + 1).padStart(3, '0')}`;
+            try {
+                const info = await fetchVideoInfo(cleanUrl);
+                trackName  = sanitizeFilename(stripEmojis(info.title || trackName));
+            } catch {}
+
+            const outPattern = path.join(tempDir, `${String(i + 1).padStart(3, '0')}_${trackName}.%(ext)s`);
+
+            let succeeded = false;
+            for (const strategy of DOWNLOAD_STRATEGIES) {
+                const args = [
+                    ...strategy.extraArgs,
+                    ...sharedArgs(),
+                    '-f', strategy.formatArg,
+                    '--extract-audio',
+                    '--audio-format', conversionFormat,
+                    '--audio-quality', qualityArg,
+                    '--newline',
+                    '-o', outPattern,
+                    cleanUrl,
+                ];
+                try { await spawnYtdlp(args, null); succeeded = true; break; } catch {}
+            }
+
+            if (!succeeded) logger.warn(`Batch track ${i+1} failed: ${cleanUrl}`);
+            doneCount++;
+        }
+
+        updateDownloadStatus(downloadId, { status: 'Creating zip...', progress: 95 });
+
+        const zipName = `batch_${downloadId.substring(0, 8)}.zip`;
+        zipPath = path.join(MP3_STORAGE_PATH, zipName);
+        await execAsync(`cd "${tempDir}" && zip -r "${zipPath}" .`, { timeout: 180000 });
+
+        try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
+
+        const stat = fs.statSync(zipPath);
+        if (stat.size === 0) throw new Error('Zip file is empty');
+
+        registerFile(zipPath);
+        logger.success(`Batch zip ready: ${zipName} (${(stat.size / 1048576).toFixed(2)} MB)`);
+
+        updateDownloadStatus(downloadId, {
+            status:      'Batch ready!',
+            progress:    100,
+            complete:    true,
+            downloadUrl: `${BASE_PATH}/downloads/${encodeURIComponent(zipName)}`,
+            filename:    zipName,
+            expiresAt:   Date.now() + FILE_TTL_MS,
+            isBatch:     true,
+            done:        doneCount,
+            total,
+        });
+
+    } catch (err) {
+        logger.error(`Batch zip failed [${downloadId}]: ${err.message}`);
+        updateDownloadStatus(downloadId, { error: true, status: `Failed: ${err.message}`, complete: true });
+        try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
+        if (zipPath && fs.existsSync(zipPath)) try { fs.unlinkSync(zipPath); } catch {}
+    }
+}
+
 fastify.get('/api/health', async (req, reply) => {
     const files = await fs.promises.readdir(MP3_STORAGE_PATH).catch(() => []);
     return reply.send({
@@ -840,6 +1436,7 @@ async function start() {
     loadOrCreateApiKey();
     await checkDependencies();
     startCleanupSweep();
+    startYtDlpAutoUpdate();
 
     try {
         await fastify.listen({ port: PORT, host: '0.0.0.0' });
