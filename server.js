@@ -10,13 +10,9 @@ const execAsync       = promisify(exec);
 const readline        = require('readline');
 
 const httpsAgent = new https.Agent({
-    keepAlive:            true,
-    keepAliveMsecs:       30000,
-    maxSockets:           10,
-    maxFreeSockets:       5,
-    timeout:              8000,
-    scheduling:           'lifo',
-    family:               4,
+    keepAlive: true, keepAliveMsecs: 15000,
+    maxSockets: 3, maxFreeSockets: 1,
+    timeout: 6000, scheduling: 'lifo', family: 4,
 });
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -27,13 +23,13 @@ const WEB_ROOT         = path.join(__dirname, 'web');
 const MAX_REQUESTS     = parseInt(process.env.MAX_REQUESTS) || 100;
 const TIME_WINDOW      = parseInt(process.env.TIME_WINDOW)  || 60000;
 const FILE_TTL_MS      = 60 * 60 * 1000; // 1 hour
-const QUEUE_CONCURRENCY = 3;
+const QUEUE_CONCURRENCY = 2;
 const CACHE_DIR = path.join(MP3_STORAGE_PATH, '.cache');
 if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true });
 
 const BASE_PATH = (process.env.BASE_PATH || '').replace(/\/+$/, '');
 
-const ACOUSTID_KEY = process.env.ACOUSTID_KEY || '';
+const ACOUSTID_KEY = process.env.ACOUSTID_KEY || 'gqaHKRGZFM';
 
 function getFpcalcPath() {
     const candidates = [
@@ -53,9 +49,7 @@ const COOKIES_FILE = (() => {
     try { return fs.existsSync(p) ? p : null; } catch { return null; }
 })();
 
-const DOWNLOAD_RATE_LIMIT    = parseInt(process.env.DOWNLOAD_RATE_LIMIT) || 5;
-const DOWNLOAD_RATE_WINDOW   = parseInt(process.env.DOWNLOAD_RATE_WINDOW) || 60000;
-const downloadRateLimitCache = new Map();
+
 
 const API_KEY_FILE = path.join(__dirname, '.apikey');
 let API_KEY = '';
@@ -97,36 +91,82 @@ function isValidYouTubeUrl(url) {
     } catch { return false; }
 }
 
-const fileRegistry = new Map();
+// ─── Persistent file registry ────────────────────────────────────────────────
+// Stored as JSON on disk so files are still cleaned up after server restarts.
+// Without this, every restart orphaned all temp files permanently.
+
+const REGISTRY_PATH = path.join(MP3_STORAGE_PATH, '.registry.json');
+
+const fileRegistry = new Map(); // name → expiresAt (ms)
+
+function saveRegistry() {
+    try {
+        const obj = {};
+        for (const [k, v] of fileRegistry) obj[k] = v;
+        fs.writeFileSync(REGISTRY_PATH, JSON.stringify(obj));
+    } catch {}
+}
+
+function loadRegistry() {
+    try {
+        const raw = fs.readFileSync(REGISTRY_PATH, 'utf8');
+        const obj = JSON.parse(raw);
+        const now = Date.now();
+        for (const [k, v] of Object.entries(obj)) {
+            if (v > now) fileRegistry.set(k, v); // skip already-expired entries
+        }
+        logger.info(`Registry loaded: ${fileRegistry.size} tracked files`);
+    } catch {}
+}
 
 function registerFile(filePath) {
     const name = path.basename(filePath);
     const expiresAt = Date.now() + FILE_TTL_MS;
     fileRegistry.set(name, expiresAt);
+    saveRegistry();
+}
+
+function renewFile(filePath) {
+    const name = path.basename(filePath);
+    if (fileRegistry.has(name)) {
+        fileRegistry.set(name, Date.now() + FILE_TTL_MS);
+        saveRegistry();
+        logger.info(`TTL renewed: ${name}`);
+    }
 }
 
 function startCleanupSweep() {
-    setInterval(() => {
+    // Run once at startup to immediately delete anything already expired
+    function sweep() {
         const now = Date.now();
+        let changed = false;
         for (const [name, expiresAt] of fileRegistry) {
             if (now >= expiresAt) {
                 const full = path.join(MP3_STORAGE_PATH, name);
                 try { fs.unlinkSync(full); logger.info(`Swept: ${name}`); } catch {}
                 fileRegistry.delete(name);
+                changed = true;
             }
         }
+        if (changed) saveRegistry();
+
+        // Also sweep orphaned temp files (no registry entry, older than 2h)
         try {
-            const files = fs.readdirSync(MP3_STORAGE_PATH);
-            for (const f of files) {
-                if (!f.startsWith('temp_')) continue;
+            for (const f of fs.readdirSync(MP3_STORAGE_PATH)) {
+                if (!f.startsWith('temp_') && !f.startsWith('batch_')) continue;
                 const full = path.join(MP3_STORAGE_PATH, f);
                 try {
-                    const age = now - fs.statSync(full).mtimeMs;
-                    if (age > 2 * 60 * 60 * 1000) { fs.unlinkSync(full); }
+                    if (now - fs.statSync(full).mtimeMs > 2 * 60 * 60 * 1000) {
+                        fs.unlinkSync(full);
+                        logger.info(`Orphan swept: ${f}`);
+                    }
                 } catch {}
             }
         } catch {}
-    }, 5 * 60 * 1000);
+    }
+
+    sweep(); // immediate pass on startup
+    setInterval(sweep, 5 * 60 * 1000);
 }
 
 // ─── yt-dlp / deno detection ──────────────────────────────────────────────────
@@ -163,50 +203,27 @@ function getDenoPath() {
 const YT_DLP   = getYtDlpPath();
 const DENO_PATH = getDenoPath();
 
-function buildEnv() {
+const CHILD_ENV = (() => {
     const homeDirs = [
         process.env.HOME && path.join(process.env.HOME, '.local', 'bin'),
         process.env.HOME && path.join(process.env.HOME, '.deno', 'bin'),
-        '/snap/bin',
-        '/usr/local/bin',
-        '/usr/bin',
-        '/bin',
+        '/snap/bin', '/usr/local/bin', '/usr/bin', '/bin',
     ].filter(Boolean);
-
     const denoDir = DENO_PATH ? path.dirname(DENO_PATH) : null;
     const allDirs = denoDir ? [denoDir, ...homeDirs] : homeDirs;
-    const existingDirs = (process.env.PATH || '').split(':');
-    const merged = [...new Set([...allDirs, ...existingDirs])].join(':');
-
-    return {
-        ...process.env,
-        PATH: merged,
-        HOME: process.env.HOME || '/root',
+    const merged  = [...new Set([...allDirs, ...(process.env.PATH || '').split(':')])].join(':');
+    return { ...process.env, PATH: merged, HOME: process.env.HOME || '/root',
         DENO_DIR: process.env.DENO_DIR || path.join(process.env.HOME || '/root', '.deno'),
-        ACOUSTID_KEY: 'gqaHKRGZFM',
-    };
-}
+        ACOUSTID_KEY };
+})();
+function buildEnv() { return CHILD_ENV; }
 
 // ─── Download strategies ───────────────────────────────────────────────────────
 
 const DOWNLOAD_STRATEGIES = [
-    // tv_embedded is the most reliable client for restricted/geo-blocked content —
-    // put it first to avoid wasting 4-8s on android_vr/ios failures.
-    {
-        name: 'tv_embedded',
-        extraArgs: ['--extractor-args', 'youtube:player_client=tv_embedded'],
-        formatArg: 'bestaudio/best',
-    },
-    {
-        name: 'ios',
-        extraArgs: ['--extractor-args', 'youtube:player_client=ios'],
-        formatArg: 'bestaudio/best',
-    },
-    {
-        name: 'android_vr',
-        extraArgs: ['--extractor-args', 'youtube:player_client=android_vr'],
-        formatArg: 'bestaudio/best',
-    },
+    { name: 'tv_embedded', extraArgs: ['--extractor-args', 'youtube:player_client=tv_embedded'], formatArg: 'bestaudio[ext=m4a]/bestaudio/best' },
+    { name: 'ios',         extraArgs: ['--extractor-args', 'youtube:player_client=ios'],         formatArg: 'bestaudio[ext=m4a]/bestaudio/best' },
+    { name: 'android_vr',  extraArgs: ['--extractor-args', 'youtube:player_client=android_vr'],  formatArg: 'bestaudio[ext=m4a]/bestaudio/best' },
 ];
 
 function sharedArgs(isPlaylist = false) {
@@ -214,13 +231,12 @@ function sharedArgs(isPlaylist = false) {
         '--no-check-certificate',
         isPlaylist ? '--yes-playlist' : '--no-playlist',
         '--no-warnings',
-        '--socket-timeout', '30',
-        '--retries', '5',
-        '--fragment-retries', '5',
-        '--retry-sleep', '3',
-        // Parallel fragment downloading — cuts download time 2-4x on most connections.
-        // 4 is a safe number that won't trigger YouTube rate-limiting.
+        '--socket-timeout', '15',
+        '--retries', '3',
+        '--fragment-retries', '3',
+        '--retry-sleep', '2',
         '--concurrent-fragments', '4',
+        '--buffer-size', '16K',
         ...(COOKIES_FILE ? ['--cookies', COOKIES_FILE] : []),
     ];
 }
@@ -256,15 +272,65 @@ function buildQualityArg(audioFormat, quality) {
         case 'wav':
         case 'm4a':
             return `${quality}K`;
-        case 'ogg':
-            // OGG vorbis quality scale 0-10; map kbps to approximate scale
-            // 128→3, 192→5, 256→7, 320→9
-            return String(Math.round((quality - 128) / 48 * 2 + 3));
+        case 'ogg': {
+            // libvorbis quality is 0-10 (NOT kbps). Old code overflowed to 11 at 320kbps.
+            const v = Math.round((quality - 128) / 48 * 2 + 3);
+            return String(Math.min(10, Math.max(0, v)));
+        }
         case 'mp3':
         default:
             // Use explicit CBR bitrate — fastest for low-power CPUs
             return `${quality}K`;
     }
+}
+
+// ─── Pipelined download + encode ─────────────────────────────────────────────
+// yt-dlp stdout → ffmpeg stdin simultaneously.
+// Encoding starts with the first arriving bytes — no post-download wait.
+
+async function downloadAndEncodePiped(url, strategy, outputPath, ffmpegAudioArgs, isPreview, onProgress) {
+    return new Promise((resolve, reject) => {
+        const ytArgs = [
+            ...strategy.extraArgs,
+            '--no-check-certificate', '--no-playlist', '--no-warnings',
+            '--socket-timeout', '15', '--retries', '3',
+            '--concurrent-fragments', '4', '--buffer-size', '16K',
+            ...(COOKIES_FILE ? ['--cookies', COOKIES_FILE] : []),
+            '-f', 'bestaudio[ext=m4a]/bestaudio/best',
+            ...(isPreview ? ['--download-sections', '*0-30', '--force-keyframes-at-cuts'] : []),
+            '-o', '-', '--newline', url,
+        ];
+        const ffArgs = [
+            '-hide_banner', '-loglevel', 'error',
+            '-i', 'pipe:0', '-vn', '-threads', '1',
+            ...ffmpegAudioArgs, '-y', outputPath,
+        ];
+        const ytdlp  = spawn(YT_DLP,  ytArgs, { env: CHILD_ENV });
+        const ffmpeg = spawn('ffmpeg', ffArgs,  { env: CHILD_ENV });
+        ytdlp.stdout.pipe(ffmpeg.stdin);
+
+        let ytErr = '';
+        ytdlp.stderr.on('data', d => {
+            const t = d.toString(); ytErr += t;
+            if (!onProgress) return;
+            for (const line of t.split('\n').reverse()) {
+                const m = line.match(/\[download\]\s+(\d+\.?\d*)%(?:.*?at\s+([\d.]+\s*\S+\/s))?(?:.*?ETA\s+(\S+))?/);
+                if (m) { onProgress('download', parseFloat(m[1]), m[2]||null, m[3]||null); break; }
+            }
+        });
+        let ffErr = '';
+        ffmpeg.stderr.on('data', d => { ffErr += d.toString(); });
+
+        ytdlp.on('close', code => {
+            if (code !== 0) { ffmpeg.stdin.destroy(); ffmpeg.kill(); reject(new Error(ytErr.trim().split('\n').pop() || `yt-dlp ${code}`)); }
+        });
+        ffmpeg.on('close', code => {
+            if (code === 0) resolve();
+            else reject(new Error(`ffmpeg: ${ffErr.trim().split('\n').pop() || code}`));
+        });
+        ytdlp.on('error',  e => reject(new Error(`yt-dlp: ${e.message}`)));
+        ffmpeg.on('error', e => reject(new Error(`ffmpeg: ${e.message}`)));
+    });
 }
 
 // ─── Auto-update yt-dlp daily ─────────────────────────────────────────────────
@@ -286,7 +352,7 @@ function startYtDlpAutoUpdate() {
     setTimeout(() => {
         tryUpdate();
         setInterval(tryUpdate, CHECK_INTERVAL);
-    }, 60 * 60 * 1000);
+    }, 5 * 60 * 1000);
 }
 
 // ─── Dependency check ─────────────────────────────────────────────────────────
@@ -421,10 +487,19 @@ function drainQueue() {
 
 const activeDownloads = new Map();
 
+function pruneActiveDownloads() {
+    if (activeDownloads.size < 30) return;
+    const cutoff = Date.now() - 10 * 60 * 1000;
+    for (const [id, job] of activeDownloads) {
+        if ((job.complete || job.error) && job._ts && job._ts < cutoff) activeDownloads.delete(id);
+    }
+}
 function updateDownloadStatus(id, updates) {
     const next = { ...(activeDownloads.get(id) || {}), ...updates };
+    if (updates.complete || updates.error) next._ts = Date.now();
     activeDownloads.set(id, next);
     process.emit(`progress-${id}`, next);
+    pruneActiveDownloads();
 }
 
 // ─── yt-dlp spawner ───────────────────────────────────────────────────────────
@@ -505,7 +580,7 @@ async function fetchVideoInfoFast(url) {
     const encoded = encodeURIComponent(url);
     const data    = await httpGet(
         `https://www.youtube.com/oembed?url=${encoded}&format=json`,
-        4000
+        2500
     );
 
     if (!data.title) throw new Error('oEmbed returned no title');
@@ -573,7 +648,7 @@ async function enrichDurationAsync(url, videoId) {
     if (!videoId) return;
     if (durationCache.has(videoId)) return;
     try {
-        const cmd = `"${YT_DLP}" --no-playlist --no-warnings --retries 1 --socket-timeout 8 --extractor-args "youtube:player_client=android_vr" --print duration "${url}"`;
+        const cmd = `"${YT_DLP}" --no-playlist --no-warnings --retries 1 --socket-timeout 8 --extractor-args "youtube:player_client=tv_embedded" --print duration "${url}"`;
         const { stdout } = await execAsync(cmd, { timeout: 12000, env: buildEnv() });
         const secs = parseInt(stdout.trim());
         if (!isNaN(secs) && secs > 0) {
@@ -587,20 +662,12 @@ async function enrichDurationAsync(url, videoId) {
 // Uses -c copy so it's just a container re-wrap with new tags — extremely fast
 // even on an i3-6006U. No re-encoding.
 
-// Circuit breaker: if AcoustID returns HTTP 400 (bad API key) repeatedly, disable it
-// so we stop wasting fpcalc CPU time (2-5s on i3-6006U) on every download.
-let acoustIdFailCount = 0;
-const ACOUSTID_MAX_FAILS = 2; // disable after 2 consecutive 400s
+let acoustidFailCount = 0;
 
 async function autoTagWithAcoustID(filePath, downloadId) {
-    if (!ACOUSTID_KEY || !FPCALC_PATH) {
-        if (!ACOUSTID_KEY) logger.warn(`[${downloadId}] AcoustID: no API key`);
-        if (!FPCALC_PATH)  logger.warn(`[${downloadId}] AcoustID: fpcalc not found`);
-        return null;
-    }
-
-    if (acoustIdFailCount >= ACOUSTID_MAX_FAILS) {
-        logger.warn(`[${downloadId}] AcoustID: disabled after ${acoustIdFailCount} consecutive failures (likely bad API key)`);
+    if (!FPCALC_PATH) { logger.warn(`[${downloadId}] AcoustID: fpcalc not found`); return null; }
+    if (acoustidFailCount >= 2) {
+        logger.warn(`[${downloadId}] AcoustID circuit open (bad key — fix ACOUSTID_KEY)`);
         return null;
     }
 
@@ -636,36 +703,44 @@ async function autoTagWithAcoustID(filePath, downloadId) {
 
         if (!title && !artist) throw new Error('No usable metadata');
 
-        logger.success(`[${downloadId}] AcoustID matched: "${artist} - ${title}" (score: ${best.score.toFixed(2)})`);
-        acoustIdFailCount = 0; // reset circuit breaker on success
-        // Single-pass: -c copy means no re-encoding — just rewrites the container with new tags.
-        // On an i3-6006U this takes < 1 second for any file size.
+        acoustidFailCount = 0;
+        logger.success(`[${downloadId}] AcoustID: "${artist} - ${title}" (score: ${best.score.toFixed(2)})`);
+
+        // Rewrite tags with -c copy (no re-encode, < 1s on any file size).
+        // Use spawn instead of exec so metadata values with spaces are passed
+        // as proper argv entries — the old execAsync shell-string approach
+        // broke on titles like "My Song" (split at the space).
         const taggedPath = filePath + '.acoustid.mp3';
-        const metaParts  = [
-            ...(title  ? ['-metadata', `title=${title}`]   : []),
-            ...(artist ? ['-metadata', `artist=${artist}`] : []),
-            ...(album  ? ['-metadata', `album=${album}`]   : []),
-            ...(year   ? ['-metadata', `date=${year}`]     : []),
-        ];
-        const metaStr = metaParts.map(a => a.includes(' ') ? `"${a}"` : a).join(' ');
-        await execAsync(
-            `ffmpeg -y -i "${filePath}" -c copy ${metaStr} "${taggedPath}"`,
-            { timeout: 30000, env: buildEnv() }
-        );
+        await new Promise((resolve, reject) => {
+            const args = [
+                '-y', '-i', filePath,
+                '-c:a', 'copy',
+                ...(title  ? ['-metadata', `title=${title}`]   : []),
+                ...(artist ? ['-metadata', `artist=${artist}`] : []),
+                ...(album  ? ['-metadata', `album=${album}`]   : []),
+                ...(year   ? ['-metadata', `date=${year}`]     : []),
+                taggedPath,
+            ];
+            const proc = spawn('ffmpeg', args, { env: CHILD_ENV || buildEnv() });
+            let stderr = '';
+            proc.stderr.on('data', d => { stderr += d.toString(); });
+            proc.on('close', code => {
+                if (code === 0) resolve();
+                else reject(new Error(stderr.trim().split('\n').pop() || `ffmpeg exited ${code}`));
+            });
+            proc.on('error', reject);
+        });
         fs.renameSync(taggedPath, filePath);
 
-        logger.success(`[${downloadId}] AcoustID tags written`);
+        logger.success(`[${downloadId}] AcoustID tags written: "${artist} - ${title}"`);
         return { title, artist, album, year, score: best.score };
 
     } catch (err) {
         if (err.message.includes('HTTP 400')) {
-            acoustIdFailCount++;
-            logger.warn(`[${downloadId}] AcoustID failed (HTTP 400 — bad API key?): ${acoustIdFailCount}/${ACOUSTID_MAX_FAILS} strikes`);
-            if (acoustIdFailCount >= ACOUSTID_MAX_FAILS) {
-                logger.warn(`AcoustID circuit breaker OPEN — auto-tagging disabled. Fix ACOUSTID_KEY to re-enable.`);
-            }
+            acoustidFailCount++;
+            logger.warn(`[${downloadId}] AcoustID HTTP 400 (bad key) — strike ${acoustidFailCount}/2`);
         } else {
-            logger.warn(`[${downloadId}] AcoustID failed: ${err.message}`);
+            logger.warn(`[${downloadId}] AcoustID: ${err.message}`);
         }
         return null;
     }
@@ -709,17 +784,11 @@ async function processYoutubeDownload(url, downloadId, audioFormat = 'mp3', qual
         const conversionFormat = formatMap[audioFormat] || audioFormat;
 
         let filename = sanitizeFilename(outputFilename || 'download');
-        const extRe = new RegExp(`\\.${audioFormat}$`, 'i');
+        const extRe = new RegExp(`\.${audioFormat}$`, 'i');
         if (!extRe.test(filename)) filename = filename.replace(/\.[^/.]+$/, '') + '.' + audioFormat;
 
         finalOutputPath = path.join(MP3_STORAGE_PATH, filename);
-        const tempPattern = path.join(MP3_STORAGE_PATH, `temp_${downloadId}.%(ext)s`);
-
         const qualityArg = buildQualityArg(audioFormat, quality);
-
-        // Build single-pass tag args — injected directly into yt-dlp's ffmpeg call.
-        // This replaces the old second-pass ffmpeg tagging entirely.
-        const tagArgs = (metaTags && !isPreview) ? buildTagPostprocessorArgs(metaTags) : [];
 
         let lastProgress = 0;
         const onProgress = (type, pct, speed, eta) => {
@@ -729,65 +798,93 @@ async function processYoutubeDownload(url, downloadId, audioFormat = 'mp3', qual
                     lastProgress = calc;
                     updateDownloadStatus(downloadId, {
                         status:   `Downloading: ${Math.floor(pct)}%`,
-                        progress: lastProgress,
-                        speed:    speed || null,
-                        eta:      eta   || null,
+                        progress: lastProgress, speed: speed||null, eta: eta||null,
                     });
                 }
             } else if (type === 'convert' && lastProgress < 95) {
                 lastProgress = 95;
-                updateDownloadStatus(downloadId, { status: 'Finalizing audio...', progress: 95, speed: null, eta: null });
+                updateDownloadStatus(downloadId, { status: 'Finalizing...', progress: 95, speed: null, eta: null });
             }
         };
 
-        let succeeded = false;
-        let lastError  = null;
+        // ── Format routing ──────────────────────────────────────────────────
+        //  mp3, wav  → pipe: simultaneous download+encode, no wait after dl
+        //  m4a       → yt-dlp postprocessor: native aac remux, near-instant
+        //  ogg       → yt-dlp postprocessor: libvorbis (quality 0-10, fixed)
+        //  any + embedThumbnail → yt-dlp postprocessor (needs its own chain)
 
-        for (const strategy of DOWNLOAD_STRATEGIES) {
-            logger.info(`[${downloadId}] trying: ${strategy.name}`);
-            try {
-                const stale = fs.readdirSync(MP3_STORAGE_PATH).filter(f => f.startsWith(`temp_${downloadId}`));
-                for (const f of stale) fs.unlinkSync(path.join(MP3_STORAGE_PATH, f));
-            } catch {}
+        const usePipe = (audioFormat === 'mp3' || audioFormat === 'wav') && !embedThumbnail;
 
-            const args = [
-                ...strategy.extraArgs,
-                ...sharedArgs(),
-                '-f', strategy.formatArg,
-                '--extract-audio',
-                '--audio-format', conversionFormat,
-                '--audio-quality', qualityArg,
-                '--newline',
-                ...(isPreview ? ['--download-sections', '*0-30', '--force-keyframes-at-cuts'] : []),
-                ...(embedThumbnail && audioFormat === 'mp3' ? ['--embed-thumbnail', '--convert-thumbnails', 'jpg'] : []),
-                ...tagArgs,   // <-- SINGLE-PASS TAGS: embedded here, no second ffmpeg call
-                '-o', tempPattern,
-                url,
-            ];
-
-            try {
-                await spawnYtdlp(args, onProgress);
-                succeeded = true;
-                logger.success(`[${downloadId}] strategy "${strategy.name}" succeeded`);
-                break;
-            } catch (err) {
-                lastError = err;
-                logger.warn(`[${downloadId}] strategy "${strategy.name}" failed: ${err.message.slice(0, 200)}`);
+        if (usePipe) {
+            const metaParts = [];
+            if (metaTags && !isPreview) {
+                if (metaTags.title)  metaParts.push('-metadata', `title=${metaTags.title}`);
+                if (metaTags.artist) metaParts.push('-metadata', `artist=${metaTags.artist}`);
+                if (metaTags.album)  metaParts.push('-metadata', `album=${metaTags.album}`);
+                if (metaTags.year)   metaParts.push('-metadata', `date=${metaTags.year}`);
+                if (metaTags.genre)  metaParts.push('-metadata', `genre=${metaTags.genre}`);
+                if (metaTags.track)  metaParts.push('-metadata', `track=${metaTags.track}`);
             }
+            const ffmpegAudioArgs = audioFormat === 'mp3'
+                ? ['-c:a', 'libmp3lame', '-b:a', `${quality}k`, ...metaParts]
+                : ['-c:a', 'pcm_s16le', ...metaParts];
+
+            let succeeded = false, lastError = null;
+            for (const strategy of DOWNLOAD_STRATEGIES) {
+                logger.info(`[${downloadId}] trying (pipe/${audioFormat}): ${strategy.name}`);
+                try {
+                    if (fs.existsSync(finalOutputPath)) fs.unlinkSync(finalOutputPath);
+                    await downloadAndEncodePiped(url, strategy, finalOutputPath, ffmpegAudioArgs, isPreview, onProgress);
+                    succeeded = true;
+                    logger.success(`[${downloadId}] pipe "${strategy.name}" succeeded`);
+                    break;
+                } catch (err) {
+                    lastError = err;
+                    logger.warn(`[${downloadId}] pipe "${strategy.name}" failed: ${err.message.slice(0,200)}`);
+                    if (fs.existsSync(finalOutputPath)) try { fs.unlinkSync(finalOutputPath); } catch {}
+                }
+            }
+            if (!succeeded) throw lastError || new Error('All pipe strategies failed');
+
+        } else {
+            const tempPattern = path.join(MP3_STORAGE_PATH, `temp_${downloadId}.%(ext)s`);
+            const tagArgs = (metaTags && !isPreview) ? buildTagPostprocessorArgs(metaTags) : [];
+
+            let succeeded = false, lastError = null;
+            for (const strategy of DOWNLOAD_STRATEGIES) {
+                logger.info(`[${downloadId}] trying: ${strategy.name}`);
+                try {
+                    const stale = fs.readdirSync(MP3_STORAGE_PATH).filter(f => f.startsWith(`temp_${downloadId}`));
+                    for (const f of stale) try { fs.unlinkSync(path.join(MP3_STORAGE_PATH, f)); } catch {}
+                } catch {}
+                const args = [
+                    ...strategy.extraArgs, ...sharedArgs(),
+                    '-f', strategy.formatArg,
+                    '--extract-audio', '--audio-format', conversionFormat,
+                    '--audio-quality', qualityArg, '--newline',
+                    ...(isPreview ? ['--download-sections', '*0-30', '--force-keyframes-at-cuts'] : []),
+                    ...(embedThumbnail ? ['--embed-thumbnail', '--convert-thumbnails', 'jpg'] : []),
+                    ...tagArgs, '-o', tempPattern, url,
+                ];
+                try {
+                    await spawnYtdlp(args, onProgress);
+                    succeeded = true;
+                    logger.success(`[${downloadId}] strategy "${strategy.name}" succeeded`);
+                    break;
+                } catch (err) {
+                    lastError = err;
+                    logger.warn(`[${downloadId}] strategy "${strategy.name}" failed: ${err.message.slice(0,200)}`);
+                }
+            }
+            if (!succeeded) throw lastError || new Error('All download strategies failed');
+
+            const tmpFile = fs.readdirSync(MP3_STORAGE_PATH).find(f => f.startsWith(`temp_${downloadId}`));
+            if (!tmpFile) throw new Error('Output file not generated by yt-dlp.');
+            const tmpPath = path.join(MP3_STORAGE_PATH, tmpFile);
+            if (fs.existsSync(finalOutputPath)) fs.unlinkSync(finalOutputPath);
+            fs.renameSync(tmpPath, finalOutputPath);
         }
 
-        if (!succeeded) throw lastError || new Error('All download strategies failed');
-
-        const tmpFile = fs.readdirSync(MP3_STORAGE_PATH).find(f => f.startsWith(`temp_${downloadId}`));
-        if (!tmpFile) throw new Error('Output file not generated by yt-dlp.');
-
-        const tmpPath = path.join(MP3_STORAGE_PATH, tmpFile);
-        if (fs.existsSync(finalOutputPath)) fs.unlinkSync(finalOutputPath);
-        fs.renameSync(tmpPath, finalOutputPath);
-
-        // ── NO MORE SECOND FFMPEG PASS ──
-        // Tags were already embedded above via --postprocessor-args.
-        // The old second-pass block has been removed entirely.
 
         const stat = fs.statSync(finalOutputPath);
         if (stat.size === 0) throw new Error('Converted file is empty.');
@@ -957,9 +1054,9 @@ async function processPlaylistDownload(url, downloadId, audioFormat = 'mp3', qua
 const fastify = require('fastify')({
     trustProxy: true,
     logger: false,
-    bodyLimit: 10485760,
+    bodyLimit: 1048576,
     requestTimeout: 300000,
-    keepAliveTimeout: 600000,
+    keepAliveTimeout: 30000,
 });
 
 fastify.addContentTypeParser('application/json', { parseAs: 'string' }, (req, body, done) => {
@@ -982,7 +1079,7 @@ fastify.addHook('onRequest', (request, reply, done) => {
     const ip  = request.ip;
     const now = Date.now();
 
-    if (rateLimitCache.size > 10000) {
+    if (rateLimitCache.size > 200) {
         for (const [k, v] of rateLimitCache)
             if (now - v.timestamp > TIME_WINDOW) rateLimitCache.delete(k);
     }
@@ -1174,24 +1271,28 @@ fastify.get('/api/download', async (req, reply) => {
         const cachedFilePath = path.join(CACHE_DIR, `${fileHash}.${format}`);
 
         if (fs.existsSync(cachedFilePath)) {
-            logger.success(`[CACHE HIT] Instantly copying cache to requested filename`);
+            logger.success(`[CACHE HIT] ${fileHash}`);
 
             const displayTitle = customFilename || `Download_${id.substring(0,6)}`;
-            const finalFilename = `${displayTitle}.${format}`;
+            const finalFilename = sanitizeFilename(displayTitle) + `.${format}`;
             const finalPath = path.join(MP3_STORAGE_PATH, finalFilename);
 
-            fs.copyFileSync(cachedFilePath, finalPath);
+            await fs.promises.copyFile(cachedFilePath, finalPath);
 
+            // Renew the TTL — same link requested again resets the 1h clock
+            registerFile(finalPath);
+
+            const newExpiresAt = Date.now() + FILE_TTL_MS;
             activeDownloads.set(id, {
-                status: 'Cache Hit! Ready.',
-                progress: 100,
-                complete: true,
-                filename: finalFilename,
-                downloadUrl: `/mp3/downloads/${encodeURIComponent(finalFilename)}`,
-                expiresAt: Date.now() + FILE_TTL_MS
+                status:      'Ready (cached)',
+                progress:    100,
+                complete:    true,
+                filename:    finalFilename,
+                downloadUrl: `${BASE_PATH}/downloads/${encodeURIComponent(finalFilename)}`,
+                expiresAt:   newExpiresAt,
+                cached:      true,
             });
 
-            registerFile(finalPath);
             return reply.send({ id, isPlaylist: false, cached: true });
         }
     }
@@ -1329,93 +1430,231 @@ fastify.post('/api/batch-zip', async (req, reply) => {
     activeDownloads.set(id, { status: 'Queued', progress: 0, isBatch: true, total: urls.length, done: 0 });
     reply.send({ id });
 
-    enqueue(() => processBatchZip(urls, id, format || 'mp3', parseInt(quality) || 192))
+    // Batch runs outside the main download queue — it manages its own concurrency
+    // internally and shouldn't block single-track downloads for minutes at a time.
+    processBatchZip(urls, id, format || 'mp3', parseInt(quality) || 192)
         .catch(err => logger.error('Unhandled batch-zip error:', err));
 });
 
 async function processBatchZip(urls, downloadId, audioFormat, quality) {
-    const formatMap = { ogg: 'vorbis', m4a: 'aac' };
+    const formatMap      = { ogg: 'vorbis', m4a: 'aac' };
     const conversionFormat = formatMap[audioFormat] || audioFormat;
-    const qualityArg = buildQualityArg(audioFormat, quality);
+    const qualityArg     = buildQualityArg(audioFormat, quality);
+    const usePipe        = (audioFormat === 'mp3' || audioFormat === 'wav');
 
-    const tempDir = path.join(MP3_STORAGE_PATH, `batch_${downloadId}`);
-    let zipPath   = null;
+    // Each batch gets its own stable directory — survives restarts until TTL expires
+    const batchDir  = path.join(MP3_STORAGE_PATH, `batch_${downloadId}`);
+    const zipName   = `batch_${downloadId.substring(0, 8)}.zip`;
+    const zipPath   = path.join(MP3_STORAGE_PATH, zipName);
+
     try {
-        fs.mkdirSync(tempDir, { recursive: true });
-        const total = urls.length;
-        let doneCount = 0;
+        fs.mkdirSync(batchDir, { recursive: true });
+        const total    = urls.length;
+        let doneCount  = 0;
+        let failCount  = 0;
 
-        for (let i = 0; i < urls.length; i++) {
-            const url      = urls[i];
-            const cleanUrl = cleanYoutubeUrl(url);
+        for (let i = 0; i < total; i++) {
+            const cleanUrl = cleanYoutubeUrl(urls[i]);
             if (!cleanUrl) { doneCount++; continue; }
 
             updateDownloadStatus(downloadId, {
-                status:   `[${i+1}/${total}] Fetching...`,
-                progress: 5 + Math.floor((i / total) * 88),
-                done: i,
-                total,
+                status:   `[${i+1}/${total}] Downloading...`,
+                progress: 5 + Math.floor((i / total) * 85),
+                done: i, total,
             });
 
-            let trackName = `track_${String(i + 1).padStart(3, '0')}`;
-            try {
-                const info = await fetchVideoInfo(cleanUrl);
-                trackName  = sanitizeFilename(stripEmojis(info.title || trackName));
-            } catch {}
-
-            const outPattern = path.join(tempDir, `${String(i + 1).padStart(3, '0')}_${trackName}.%(ext)s`);
+            // Use yt-dlp's %(title)s template directly — avoids a separate oEmbed
+            // fetch per track (was adding 300-500ms * N to total time).
+            const outPattern = path.join(batchDir,
+                `${String(i + 1).padStart(3, '0')}_%(title)s.%(ext)s`);
 
             let succeeded = false;
-            for (const strategy of DOWNLOAD_STRATEGIES) {
-                const args = [
-                    ...strategy.extraArgs,
-                    ...sharedArgs(),
-                    '-f', strategy.formatArg,
-                    '--extract-audio',
-                    '--audio-format', conversionFormat,
-                    '--audio-quality', qualityArg,
-                    '--newline',
-                    '-o', outPattern,
-                    cleanUrl,
-                ];
-                try { await spawnYtdlp(args, null); succeeded = true; break; } catch {}
+
+            if (usePipe) {
+                // Pipe path for mp3/wav: encode while downloading
+                const ffmpegAudioArgs = audioFormat === 'mp3'
+                    ? ['-c:a', 'libmp3lame', '-b:a', `${quality}k`]
+                    : ['-c:a', 'pcm_s16le'];
+
+                // For pipe we need a concrete output filename — use padded index
+                // and rename after if needed. yt-dlp can't give us the title
+                // before downloading when using pipe mode.
+                const pipeDest = path.join(batchDir,
+                    `${String(i + 1).padStart(3, '0')}_track.${audioFormat}`);
+
+                for (const strategy of DOWNLOAD_STRATEGIES) {
+                    try {
+                        if (fs.existsSync(pipeDest)) fs.unlinkSync(pipeDest);
+                        await downloadAndEncodePiped(cleanUrl, strategy, pipeDest, ffmpegAudioArgs, false, null);
+                        // Try to rename using yt-dlp title after the fact via oEmbed (non-blocking best-effort)
+                        fetchVideoInfoFast(cleanUrl).then(info => {
+                            if (info?.title) {
+                                const proper = path.join(batchDir,
+                                    `${String(i + 1).padStart(3, '0')}_${sanitizeFilename(stripEmojis(info.title))}.${audioFormat}`);
+                                try { if (fs.existsSync(pipeDest)) fs.renameSync(pipeDest, proper); } catch {}
+                            }
+                        }).catch(() => {});
+                        succeeded = true;
+                        break;
+                    } catch (e) {
+                        logger.warn(`Batch [${i+1}] pipe "${strategy.name}" failed: ${e.message.slice(0,120)}`);
+                        if (fs.existsSync(pipeDest)) try { fs.unlinkSync(pipeDest); } catch {}
+                    }
+                }
+            } else {
+                // Standard yt-dlp postprocessor path (m4a, ogg)
+                for (const strategy of DOWNLOAD_STRATEGIES) {
+                    const args = [
+                        ...strategy.extraArgs,
+                        ...sharedArgs(),
+                        '-f', strategy.formatArg,
+                        '--extract-audio',
+                        '--audio-format', conversionFormat,
+                        '--audio-quality', qualityArg,
+                        '--newline',
+                        '-o', outPattern,
+                        cleanUrl,
+                    ];
+                    try { await spawnYtdlp(args, null); succeeded = true; break; } catch {}
+                }
             }
 
-            if (!succeeded) logger.warn(`Batch track ${i+1} failed: ${cleanUrl}`);
+            if (!succeeded) {
+                logger.warn(`Batch track ${i+1} failed: ${cleanUrl}`);
+                failCount++;
+            }
             doneCount++;
         }
 
-        updateDownloadStatus(downloadId, { status: 'Creating zip...', progress: 95 });
+        // ── Zip using ffmpeg's concat or native zip if available, else Node fs ──
+        updateDownloadStatus(downloadId, { status: 'Creating zip...', progress: 93, done: doneCount, total });
 
-        const zipName = `batch_${downloadId.substring(0, 8)}.zip`;
-        zipPath = path.join(MP3_STORAGE_PATH, zipName);
-        await execAsync(`cd "${tempDir}" && zip -r "${zipPath}" .`, { timeout: 180000 });
+        // Collect all audio files in the batch dir
+        const audioFiles = fs.readdirSync(batchDir)
+            .filter(f => /\.(mp3|m4a|ogg|wav|opus)$/i.test(f))
+            .sort();
 
-        try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
+        if (audioFiles.length === 0) throw new Error('No tracks were downloaded successfully');
+
+        // Use archiver-style zip via Node's built-in zlib + streams (no external zip needed)
+        await new Promise((resolve, reject) => {
+            const output = fs.createWriteStream(zipPath);
+            output.on('error', reject);
+
+            // Write a valid ZIP file manually using Node's built-in modules
+            // This avoids depending on the 'zip' CLI being installed
+            const { createDeflateRaw } = require('zlib');
+            const entries = [];
+            let offset = 0;
+            const buffers = [];
+
+            function uint16LE(n) { const b = Buffer.alloc(2); b.writeUInt16LE(n); return b; }
+            function uint32LE(n) { const b = Buffer.alloc(4); b.writeUInt32LE(n); return b; }
+
+            function crc32(buf) {
+                let crc = 0xFFFFFFFF;
+                for (const byte of buf) {
+                    crc ^= byte;
+                    for (let j = 0; j < 8; j++) crc = (crc >>> 1) ^ (crc & 1 ? 0xEDB88320 : 0);
+                }
+                return (crc ^ 0xFFFFFFFF) >>> 0;
+            }
+
+            (async () => {
+                try {
+                    for (const fname of audioFiles) {
+                        const fpath    = path.join(batchDir, fname);
+                        const fileData = await fs.promises.readFile(fpath);
+                        const crc      = crc32(fileData);
+                        const nameBytes = Buffer.from(fname, 'utf8');
+                        const dosDate  = 0x5821; // 2024-01-01
+                        const dosTime  = 0x0000;
+
+                        // Local file header
+                        const localHeader = Buffer.concat([
+                            Buffer.from([0x50,0x4B,0x03,0x04]), // sig
+                            uint16LE(20),           // version needed
+                            uint16LE(0),            // flags
+                            uint16LE(0),            // compression: stored (0 = no compression, fast)
+                            uint16LE(dosTime),
+                            uint16LE(dosDate),
+                            uint32LE(crc),
+                            uint32LE(fileData.length),
+                            uint32LE(fileData.length),
+                            uint16LE(nameBytes.length),
+                            uint16LE(0),            // extra field length
+                            nameBytes,
+                        ]);
+
+                        entries.push({ nameBytes, crc, size: fileData.length, offset, dosDate, dosTime });
+                        offset += localHeader.length + fileData.length;
+                        buffers.push(localHeader, fileData);
+                    }
+
+                    // Central directory
+                    const cdStart = offset;
+                    for (const e of entries) {
+                        const cd = Buffer.concat([
+                            Buffer.from([0x50,0x4B,0x01,0x02]),
+                            uint16LE(20), uint16LE(20),
+                            uint16LE(0),  uint16LE(0),
+                            uint16LE(e.dosTime), uint16LE(e.dosDate),
+                            uint32LE(e.crc),
+                            uint32LE(e.size), uint32LE(e.size),
+                            uint16LE(e.nameBytes.length),
+                            uint16LE(0), uint16LE(0), uint16LE(0), uint16LE(0),
+                            uint32LE(0),
+                            uint32LE(e.offset),
+                            e.nameBytes,
+                        ]);
+                        buffers.push(cd);
+                        offset += cd.length;
+                    }
+
+                    // End of central directory
+                    const cdSize = offset - cdStart;
+                    const eocd = Buffer.concat([
+                        Buffer.from([0x50,0x4B,0x05,0x06]),
+                        uint16LE(0), uint16LE(0),
+                        uint16LE(entries.length), uint16LE(entries.length),
+                        uint32LE(cdSize),
+                        uint32LE(cdStart),
+                        uint16LE(0),
+                    ]);
+                    buffers.push(eocd);
+
+                    output.end(Buffer.concat(buffers), resolve);
+                } catch(e) { reject(e); }
+            })();
+        });
+
+        // Clean up temp audio files but keep the zip
+        try { fs.rmSync(batchDir, { recursive: true, force: true }); } catch {}
 
         const stat = fs.statSync(zipPath);
         if (stat.size === 0) throw new Error('Zip file is empty');
 
+        // Register with persistent registry so it survives restarts
         registerFile(zipPath);
-        logger.success(`Batch zip ready: ${zipName} (${(stat.size / 1048576).toFixed(2)} MB)`);
+        logger.success(`Batch zip ready: ${zipName} (${(stat.size/1048576).toFixed(2)} MB) — ${doneCount - failCount}/${total} tracks`);
 
         updateDownloadStatus(downloadId, {
-            status:      'Batch ready!',
+            status:      `Batch ready! (${doneCount - failCount}/${total} tracks)`,
             progress:    100,
             complete:    true,
             downloadUrl: `${BASE_PATH}/downloads/${encodeURIComponent(zipName)}`,
             filename:    zipName,
             expiresAt:   Date.now() + FILE_TTL_MS,
             isBatch:     true,
-            done:        doneCount,
+            done:        doneCount - failCount,
             total,
         });
 
     } catch (err) {
         logger.error(`Batch zip failed [${downloadId}]: ${err.message}`);
         updateDownloadStatus(downloadId, { error: true, status: `Failed: ${err.message}`, complete: true });
-        try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch {}
-        if (zipPath && fs.existsSync(zipPath)) try { fs.unlinkSync(zipPath); } catch {}
+        try { fs.rmSync(batchDir, { recursive: true, force: true }); } catch {}
+        if (fs.existsSync(zipPath)) try { fs.unlinkSync(zipPath); } catch {}
     }
 }
 
@@ -1434,6 +1673,7 @@ fastify.get('/api/health', async (req, reply) => {
 
 async function start() {
     loadOrCreateApiKey();
+    loadRegistry();
     await checkDependencies();
     startCleanupSweep();
     startYtDlpAutoUpdate();
