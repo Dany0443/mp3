@@ -1,7 +1,6 @@
-.apikey
-yt-cookies.txt
-.env
 node_modules/
 temp/
+.env
+.apikey
 *.log
-.pm2/
+yt-cookies.txt

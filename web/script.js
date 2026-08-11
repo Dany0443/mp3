@@ -1,6 +1,6 @@
 document.addEventListener('DOMContentLoaded', () => {
 
-    // ── Elements ──────────────────────────────────────────────────────────────
+    // 
     const el = {
         urlInput:        document.getElementById('videoUrl'),
         clearBtn:        document.getElementById('clearBtn'),
@@ -35,7 +35,7 @@ document.addEventListener('DOMContentLoaded', () => {
         etaText:         document.getElementById('etaText'),
     };
 
-    // ── State ─────────────────────────────────────────────────────────────────
+    // 
     let currentVideo   = null;
     let eventSource    = null;
     let apiKey         = null;
@@ -44,7 +44,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let savedMeta      = null;
     let etaStartTime   = null;
 
-    // ── Title cleaner ─────────────────────────────────────────────────────────
+    // 
     const CLEAN_PATTERNS = [
         { re: /[\(\[]\s*(?:(?:official|oficial|music|video|videoclip|audio|clip|visualizer|lyrics?|performance|live|session|acoustic|version|ver\.?|edit|mix|remix|remaster(?:ed)?|hq|hd|4k|uhd|720p|1080p|full|fan|made|animated|animation|colou?r(?:ized)?|karaoke|instrumental|extended|radio|single|ep|deluxe|bonus|vevo|topic)\s*){1,5}[\)\]]/gi, rep: '' },
         { re: /[\(\[]\s*ofici?al\s*[\)\]]/gi, rep: '' },
@@ -68,7 +68,7 @@ document.addEventListener('DOMContentLoaded', () => {
         return { cleaned: result, wasModified: result !== raw };
     }
 
-    // ── Utilities ─────────────────────────────────────────────────────────────
+    // 
     function sanitizeFilename(str) {
         return str.replace(/[\/:*?"<>|]/g, '').replace(/\.{2,}/g, '.').replace(/^[\s.]+|[\s.]+$/g, '').substring(0, 120).trim() || 'download';
     }
@@ -84,7 +84,7 @@ document.addEventListener('DOMContentLoaded', () => {
         return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     }
 
-    // ── Bootstrap ─────────────────────────────────────────────────────────────
+    // 
     async function bootstrap() {
         try {
             const res  = await fetch('api/client-key');
@@ -113,7 +113,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // ── Auto system theme ─────────────────────────────────────────────────────
+    // 
     if (!localStorage.getItem('theme')) {
         if (window.matchMedia('(prefers-color-scheme: light)').matches) {
             document.body.classList.add('light-mode');
@@ -122,7 +122,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // ── Dropdowns ─────────────────────────────────────────────────────────────
+    // 
     function setupDropdown(dropdownId, hiddenInputId) {
         const dropdown = document.getElementById(dropdownId);
         if (!dropdown) return;
@@ -157,7 +157,7 @@ document.addEventListener('DOMContentLoaded', () => {
         document.querySelectorAll('.custom-dropdown').forEach(d => d.classList.remove('open'));
     });
 
-    // ── File size hints ───────────────────────────────────────────────────────
+    // 
     function updateSizeHints() {
         if (!currentVideo?.lengthSeconds) return;
         const secs   = currentVideo.lengthSeconds;
@@ -176,7 +176,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // ── Fetch video info ──────────────────────────────────────────────────────
+    // 
     function setFetchLoading(loading) {
         el.fetchBtn.disabled = loading;
         el.btnText.classList.toggle('hidden', loading);
@@ -214,6 +214,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
             currentVideo = data;
 
+            const playlistTracksEl = document.getElementById('playlistTracks');
+
             if (data.isPlaylist) {
                 el.title.textContent    = data.title;
                 el.author.textContent   = `${data.count} tracks`;
@@ -221,12 +223,29 @@ document.addEventListener('DOMContentLoaded', () => {
                 el.thumb.src            = data.thumbnailUrl || '';
                 if(el.playlistBadge) el.playlistBadge.classList.remove('hidden');
                 if(el.filenameRow) el.filenameRow.classList.add('hidden');
+                
+                // Render playlist tracks
+                if (playlistTracksEl && data.entries) {
+                    playlistTracksEl.classList.remove('hidden');
+                    playlistTracksEl.innerHTML = data.entries.map((entry, idx) => `
+                        <div class="playlist-track">
+                            <div class="playlist-track-num">${idx + 1}</div>
+                            <img src="${escHtml(entry.thumbnailUrl)}" class="playlist-track-thumb" alt="" onerror="this.style.display='none'">
+                            <div class="playlist-track-info">
+                                <p class="playlist-track-title">${escHtml(entry.title)}</p>
+                                <p class="playlist-track-artist">${escHtml(entry.uploader)}</p>
+                            </div>
+                            ${entry.duration ? `<div class="playlist-track-duration">${formatTime(entry.duration)}</div>` : ''}
+                        </div>
+                    `).join('');
+                }
             } else {
                 el.title.textContent    = data.title;
                 el.author.textContent   = data.author;
                 el.thumb.src            = data.thumbnailUrl;
                 if(el.playlistBadge) el.playlistBadge.classList.add('hidden');
                 if(el.filenameRow) el.filenameRow.classList.remove('hidden');
+                if(playlistTracksEl) playlistTracksEl.classList.add('hidden');
 
                 if (typeof updateFilename === 'function') updateFilename();
                 if (typeof updateSizeHints === 'function') updateSizeHints();
@@ -247,6 +266,7 @@ document.addEventListener('DOMContentLoaded', () => {
             // (savedMeta was cleared above, so this fills in fresh values)
             if (typeof syncMetadataPanel === 'function') syncMetadataPanel();
 
+
         } catch (err) {
             if (typeof showError === 'function') showError('Could not fetch: ' + err.message);
             else alert('Could not fetch: ' + err.message);
@@ -256,7 +276,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // ── Duration poller ───────────────────────────────────────────────────────
+
+
+    // 
     let durationPollTimer = null;
 
     function pollForDuration(videoId) {
@@ -308,7 +330,7 @@ document.addEventListener('DOMContentLoaded', () => {
         el.filename.value = sanitizeFilename(name) + '.' + ext;
     }
 
-    // ── Download ──────────────────────────────────────────────────────────────
+    // 
     async function startDownload() {
         if (!currentVideo) return;
         el.downloadBtn.disabled = true;
@@ -462,8 +484,17 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (ffmpegRampInterval && el.etaRow) el.etaRow.classList.add('hidden');
             }
 
-            if (data.status === 'Queued') {
-                if (el.progressHint) el.progressHint.textContent = 'Waiting in queue...';
+            if (data.status === 'Queued' || data.queuePosition) {
+                const pos = data.queuePosition;
+                const len = data.queueLength;
+                if (el.progressHint) {
+                    // Only show position when genuinely waiting behind other jobs.
+                    // pos > 1 means there's at least one job ahead — if you're the
+                    // only one queued and slots are free you're already downloading.
+                    el.progressHint.textContent = (pos && pos > 1)
+                        ? `Waiting in queue — position ${pos} of ${len}`
+                        : 'Waiting in queue...';
+                }
             }
             if (data.isPlaylist && data.total) {
                 if (el.progressHint) el.progressHint.textContent = `Tracks: ${data.done || 0} / ${data.total} done`;
@@ -479,6 +510,23 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (el.progressHint) el.progressHint.textContent = 'Please try again.';
                 if (el.downloadBtn)  el.downloadBtn.disabled     = false;
                 if (el.etaRow)       el.etaRow.classList.add('hidden');
+
+                // FIX (HIGH): Inject a one-click retry button on failure.
+                // Previously the user had to manually re-paste the URL and click fetch again.
+                if (!document.getElementById('retryDownloadBtn') && el.progressSection) {
+                    const retryBtn = document.createElement('button');
+                    retryBtn.id        = 'retryDownloadBtn';
+                    retryBtn.className = 'download-btn';
+                    retryBtn.style.cssText = 'margin-top:10px;width:100%';
+                    retryBtn.innerHTML = '<i class="fas fa-rotate-right"></i><span>Retry Download</span>';
+                    retryBtn.addEventListener('click', () => {
+                        retryBtn.remove();
+                        el.statusMsg.style.color = '';
+                        el.progressBar.style.backgroundColor = '';
+                        startDownload();
+                    });
+                    el.progressSection.appendChild(retryBtn);
+                }
                 return;
             }
 
@@ -522,18 +570,18 @@ document.addEventListener('DOMContentLoaded', () => {
         const cleanUrl = data.downloadUrl.startsWith('/mp3') ? data.downloadUrl : `/mp3${data.downloadUrl}`;
         const fullDownloadUrl = `${cleanUrl}${qs}`;
 
-        const urlInput = document.getElementById('urlInput');
         const historyItem = {
-            id: data.id || urlInput?.value || Date.now(),
-            title: data.title || document.getElementById('previewTitle')?.innerText || 'Unknown Title',
-            author: data.author || document.getElementById('previewAuthor')?.innerText || '',
-            thumbnail: data.thumbnail || document.getElementById('previewThumb')?.src || '',
-            format: 'mp3',
-            quality: data.quality || '320',
-            date: Date.now(),
-            url: fullDownloadUrl,
-            filename: (data.title || 'audio') + '.mp3',
-            sourceUrl: urlInput?.value || ''
+            id:        data.id || el.urlInput?.value || Date.now(),
+            title:     currentVideo?.title  || 'Unknown',
+            author:    currentVideo?.author || '',
+            thumbnail: currentVideo?.thumbnailUrl || '',
+            format:    el.audioFormat?.value || 'mp3',
+            quality:   el.audioQuality?.value || '320',
+            date:      Date.now(),
+            url:       fullDownloadUrl,
+            filename:  data.filename || '',          // real server filename (e.g. "INNA - Deja Vu.mp3")
+            sourceUrl: el.urlInput?.value || '',     // YouTube URL for re-fetch
+            expiresAt: data.expiresAt || (Date.now() + 60 * 60 * 1000),
         };
         addToHistory(historyItem);
 
@@ -589,7 +637,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // ── Expiry countdown ──────────────────────────────────────────────────────
+    // 
     function startExpiry(expiresAt) {
         el.expiryRow?.classList.remove('hidden');
         clearExpiry();
@@ -600,8 +648,27 @@ document.addEventListener('DOMContentLoaded', () => {
             if (remaining === 0) {
                 clearExpiry();
                 if (el.expiryTimer) el.expiryTimer.textContent = 'expired';
-                const btn = el.progressSection.querySelector('.download-success-btn');
+
+                // FIX (MEDIUM): File expired — show a re-convert button so the user
+                // doesn't have to manually reload and re-paste the URL. Previously
+                // the timer hit 0 and just froze with no affordance to continue.
+                const btn = el.progressSection?.querySelector('.download-success-btn');
                 if (btn) { btn.style.opacity = '0.4'; btn.style.pointerEvents = 'none'; }
+
+                if (!document.getElementById('reConvertPrompt') && el.progressSection) {
+                    const prompt = document.createElement('div');
+                    prompt.id        = 'reConvertPrompt';
+                    prompt.style.cssText = 'margin-top:10px;display:flex;align-items:center;gap:10px;font-size:0.85rem;color:var(--text2)';
+                    prompt.innerHTML = `<i class="fas fa-clock"></i> File expired.
+                        <button id="reConvertBtn" class="download-btn" style="padding:6px 14px;font-size:0.85rem">
+                            <i class="fas fa-rotate-right"></i><span>Re-convert</span>
+                        </button>`;
+                    el.progressSection.appendChild(prompt);
+                    document.getElementById('reConvertBtn')?.addEventListener('click', () => {
+                        document.getElementById('reConvertPrompt')?.remove();
+                        fetchVideoInfo().then(() => startDownload());
+                    });
+                }
             }
         }
         tick();
@@ -614,7 +681,7 @@ document.addEventListener('DOMContentLoaded', () => {
         el.expiryRow?.classList.add('hidden');
     }
 
-    // ── Progress reset ────────────────────────────────────────────────────────
+    // 
     function resetProgress() {
         stopFakeRamp();
         el.progressBar.style.width  = '0%';
@@ -622,9 +689,12 @@ document.addEventListener('DOMContentLoaded', () => {
         el.statusMsg.textContent    = 'Connecting...';
         el.etaRow?.classList.add('hidden');
         el.progressSection.querySelector('.download-success-btn')?.remove();
+        // Clean up transient UI injected by previous download
+        document.getElementById('retryDownloadBtn')?.remove();
+        document.getElementById('reConvertPrompt')?.remove();
     }
 
-    // ── Drag & drop URL ───────────────────────────────────────────────────────
+    // 
     function initDragDrop() {
         const overlay = document.getElementById('dragOverlay');
         let dragTimer;
@@ -645,7 +715,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // ── Keyboard shortcuts ────────────────────────────────────────────────────
+    // 
     function initKeyboardShortcuts() {
         document.addEventListener('keydown', e => {
             const active  = document.activeElement;
@@ -674,7 +744,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // ── Floating panels ───────────────────────────────────────────────────────
+    // 
     const PANELS = [
         { openId: 'openPreview',  panelId: 'previewPanel', backdropId: 'previewBackdrop', closeId: 'closePreview' },
         { openId: 'openHistory',  panelId: 'historyPanel', backdropId: 'historyBackdrop', closeId: 'closeHistory' },
@@ -736,7 +806,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // ── PANEL: Audio Preview + Waveform ───────────────────────────────────────
+    // 
     let audioCtx   = null;
     let analyser   = null;
     let sourceNode = null;
@@ -835,6 +905,10 @@ document.addEventListener('DOMContentLoaded', () => {
         const ctx     = canvas.getContext('2d');
 
         function draw() {
+            // FIX (MEDIUM): Stop the rAF loop while paused — was burning GPU
+            // continuously even when audio wasn't playing. Resume triggered by
+            // the 'play' event listener below.
+            if (audioEl.paused) { animFrame = null; return; }
             animFrame = requestAnimationFrame(draw);
             analyser.getByteFrequencyData(dataArr);
             const W = canvas.offsetWidth, H = canvas.offsetHeight;
@@ -853,6 +927,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 x += barW + 1;
             }
         }
+        // Restart the loop when playback resumes after a pause
+        audioEl.addEventListener('play', () => { if (!animFrame) draw(); });
         draw();
         audioEl.addEventListener('ended', () => {
             cancelAnimationFrame(animFrame);
@@ -860,15 +936,19 @@ document.addEventListener('DOMContentLoaded', () => {
         }, { once: true });
     }
 
-    // ── PANEL: Download History ────────────────────────────────────────────────
+    // 
     function getHistory()   { try { return JSON.parse(localStorage.getItem('dlHistory') || '[]'); } catch { return []; } }
     function saveHistory(h) { localStorage.setItem('dlHistory', JSON.stringify(h.slice(0, 50))); }
 
     function addToHistory(item) {
         let history = getHistory();
-        const itemId = item.id || item.videoId;
-        if (itemId) {
-            history = history.filter(h => (h.id || h.videoId) !== itemId);
+        // Deduplicate by YouTube source URL — same video re-downloaded moves to top
+        // (previously used job UUID which is new every download, so dupes always got through)
+        if (item.sourceUrl) {
+            history = history.filter(h => h.sourceUrl !== item.sourceUrl);
+        } else {
+            const itemId = item.id || item.videoId;
+            if (itemId) history = history.filter(h => (h.id || h.videoId) !== itemId);
         }
         history.unshift(item);
         saveHistory(history);
@@ -889,9 +969,114 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    // 
+    // Asks the server which files are still on disk or in cache.
+    // Debounced: cached for 30s so rapid panel open/close doesn't spam the server.
+    let _lastAvailCheck   = 0;
+    let _lastAvailResults = {};
+
+    async function checkHistoryAvailability(history) {
+        const now = Date.now();
+        if (now - _lastAvailCheck < 30000) return _lastAvailResults;
+
+        const items = history
+            .filter(h => h.filename)
+            .map(h => ({ filename: h.filename, sourceUrl: h.sourceUrl || '', format: h.format || 'mp3', quality: h.quality || '320' }));
+        if (!items.length) return {};
+        try {
+            const res  = await apiFetch('/mp3/api/check-files', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ items }),
+            });
+            const data = await res.json();
+            _lastAvailResults = data.results || {};
+            _lastAvailCheck   = now;
+            return _lastAvailResults;
+        } catch { return _lastAvailResults; }
+    }
+
+    // 
+    function exportHistory() {
+        const history = getHistory();
+        if (!history.length) return;
+
+        // Strip the auth-keyed download URLs before exporting — they're ephemeral anyway
+        const exportData = history.map(item => ({
+            title:     item.title     || '',
+            author:    item.author    || '',
+            format:    item.format    || '',
+            quality:   item.quality   || '',
+            date:      item.date      ? new Date(item.date).toISOString() : '',
+            sourceUrl: item.sourceUrl || '',
+            filename:  item.filename  || '',
+            thumbnail: item.thumbnail || '',
+        }));
+
+        const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+        const url  = URL.createObjectURL(blob);
+        const a    = document.createElement('a');
+        a.href     = url;
+        a.download = `fastmp3-history-${new Date().toISOString().slice(0,10)}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    function renderHistoryItem(item, i, avail) {
+        const date = new Date(item.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+        let action;
+        if (avail === 'checking') {
+            action = `<span class="history-checking" title="Checking..."><i class="fas fa-circle-notch fa-spin"></i></span>`;
+        } else if (avail === 'available') {
+            action = `<a href="${escHtml(item.url)}" download="${escHtml(item.filename)}" class="history-dl-btn history-dl-ready" title="Download now"><i class="fas fa-arrow-down"></i></a>`;
+        } else if (avail === 'cached') {
+            // Cached: instant re-download via normal download flow (server copies from cache in <1s)
+            action = `<button class="history-dl-btn history-refetch-btn history-cached-btn" data-url="${escHtml(item.sourceUrl)}" data-format="${escHtml(item.format||'mp3')}" data-quality="${escHtml(item.quality||'320')}" data-filename="${escHtml(item.filename)}" title="Instant re-download (cached)"><i class="fas fa-bolt"></i></button>`;
+        } else if (item.sourceUrl) {
+            action = `<button class="history-dl-btn history-refetch-btn" data-url="${escHtml(item.sourceUrl)}" title="Re-convert & download"><i class="fas fa-rotate-right"></i></button>`;
+        } else {
+            action = `<span class="history-expired" title="File gone"><i class="fas fa-clock"></i></span>`;
+        }
+        return `<div class="history-item" data-index="${i}" data-filename="${escHtml(item.filename || '')}">
+            <img src="${escHtml(item.thumbnail || '')}" class="history-thumb" alt="" onerror="this.style.display='none'">
+            <div class="history-info">
+                <p class="history-title">${escHtml(item.title)}</p>
+                <p class="history-meta">${escHtml(item.author || '')} · ${(item.format || '').toUpperCase()} ${item.quality || ''}kbps · ${date}</p>
+            </div>
+            <div class="history-actions">
+                ${action}
+                <button class="history-del-btn" data-index="${i}" title="Remove"><i class="fas fa-xmark"></i></button>
+            </div>
+        </div>`;
+    }
+
+    function wireHistoryEvents(list) {
+        list.querySelectorAll('.history-refetch-btn').forEach(btn => {
+            btn.addEventListener('click', e => {
+                e.stopPropagation();
+                const ytUrl = btn.dataset.url;
+                if (!ytUrl) return;
+                closeAllPanels();
+                el.urlInput.value = ytUrl;
+                fetchVideoInfo();
+            });
+        });
+        list.querySelectorAll('.history-del-btn').forEach(btn => {
+            btn.addEventListener('click', e => {
+                e.stopPropagation();
+                const h = getHistory();
+                h.splice(parseInt(btn.dataset.index), 1);
+                saveHistory(h);
+                renderHistory();
+            });
+        });
+    }
+
     function renderHistory() {
-        const list    = document.getElementById('historyList');
-        const empty   = document.getElementById('historyEmpty');
+        const list  = document.getElementById('historyList');
+        const empty = document.getElementById('historyEmpty');
         const history = getHistory();
         if (!list) return;
 
@@ -904,47 +1089,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         empty?.classList.add('hidden');
 
-        list.innerHTML = history.map((item, i) => {
-            const date    = new Date(item.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-            const expired = item.expiresAt && Date.now() > item.expiresAt;
-            const canRefetch = expired && item.sourceUrl;
-            return `<div class="history-item">
-                <img src="${escHtml(item.thumbnail || '')}" class="history-thumb" alt="" onerror="this.style.display='none'">
-                <div class="history-info">
-                    <p class="history-title">${escHtml(item.title)}</p>
-                    <p class="history-meta">${escHtml(item.author || '')} · ${(item.format || '').toUpperCase()} ${item.quality || ''}kbps · ${date}</p>
-                </div>
-                <div class="history-actions">
-                    ${!expired && item.url
-                        ? `<a href="${escHtml(item.url)}" download="${escHtml(item.filename)}" class="history-dl-btn" title="Re-download"><i class="fas fa-arrow-down"></i></a>`
-                        : canRefetch
-                            ? `<button class="history-dl-btn history-refetch-btn" data-url="${escHtml(item.sourceUrl)}" title="Re-convert & download"><i class="fas fa-rotate-right"></i></button>`
-                            : `<span class="history-expired" title="Expired"><i class="fas fa-clock"></i></span>`}
-                    <button class="history-del-btn" data-index="${i}" title="Remove"><i class="fas fa-xmark"></i></button>
-                </div>
-            </div>`;
-        }).join('');
-
-        list.querySelectorAll('.history-refetch-btn').forEach(btn => {
-            btn.addEventListener('click', e => {
-                e.stopPropagation();
-                const ytUrl = btn.dataset.url;
-                if (!ytUrl) return;
-                closeAllPanels();
-                el.urlInput.value = ytUrl;
-                fetchVideoInfo();
-            });
-        });
-
-        list.querySelectorAll('.history-del-btn').forEach(btn => {
-            btn.addEventListener('click', e => {
-                e.stopPropagation();
-                const h = getHistory();
-                h.splice(parseInt(btn.dataset.index), 1);
-                saveHistory(h);
-                renderHistory();
-            });
-        });
+        // 1. Render immediately with spinner on every action button
+        list.innerHTML = history.map((item, i) => renderHistoryItem(item, i, 'checking')).join('');
+        wireHistoryEvents(list);
 
         const clearBtn = document.getElementById('clearHistoryBtn');
         if (clearBtn) {
@@ -952,9 +1099,53 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (confirm('Clear all download history?')) { saveHistory([]); renderHistory(); }
             };
         }
+
+        const exportBtn = document.getElementById('exportHistoryBtn');
+        if (exportBtn) exportBtn.onclick = exportHistory;
+
+        // 2. Ask server which files are actually available, then update buttons in-place
+        checkHistoryAvailability(history).then(results => {
+            history.forEach((item, i) => {
+                const row = list.querySelector(`.history-item[data-index="${i}"]`);
+                if (!row) return;
+                const info   = item.filename ? (results[item.filename] || {}) : {};
+                const avail  = info.available ? 'available' : info.cached ? 'cached' : 'gone';
+                // Update only the actions cell, not the whole row
+                const actions = row.querySelector('.history-actions');
+                if (!actions) return;
+                const del = actions.querySelector('.history-del-btn')?.outerHTML || '';
+                let action;
+                if (avail === 'available') {
+                    action = `<a href="${escHtml(item.url)}" download="${escHtml(item.filename)}" class="history-dl-btn history-dl-ready" title="Download now"><i class="fas fa-arrow-down"></i></a>`;
+                } else if (avail === 'cached') {
+                    action = `<button class="history-dl-btn history-refetch-btn history-cached-btn" data-url="${escHtml(item.sourceUrl)}" title="Instant re-download (cached)"><i class="fas fa-bolt"></i></button>`;
+                } else if (item.sourceUrl) {
+                    action = `<button class="history-dl-btn history-refetch-btn" data-url="${escHtml(item.sourceUrl)}" title="Re-convert & download"><i class="fas fa-rotate-right"></i></button>`;
+                } else {
+                    action = `<span class="history-expired" title="File gone"><i class="fas fa-clock"></i></span>`;
+                }
+                actions.innerHTML = action + del;
+                // Re-wire the new buttons
+                actions.querySelector('.history-refetch-btn')?.addEventListener('click', e => {
+                    e.stopPropagation();
+                    const ytUrl = e.currentTarget.dataset.url;
+                    if (!ytUrl) return;
+                    closeAllPanels();
+                    el.urlInput.value = ytUrl;
+                    fetchVideoInfo();
+                });
+                actions.querySelector('.history-del-btn')?.addEventListener('click', e => {
+                    e.stopPropagation();
+                    const h = getHistory();
+                    h.splice(i, 1);
+                    saveHistory(h);
+                    renderHistory();
+                });
+            });
+        });
     }
 
-    // ── PANEL: Metadata Editor ────────────────────────────────────────────────
+    // 
     function syncMetadataPanel() {
         if (!currentVideo || currentVideo.isPlaylist) return;
 
@@ -994,7 +1185,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 track:  document.getElementById('metaTrack')?.value.trim()  || null,
             };
 
-            // FIX: Only save if at least one field has a value
             const hasAnyValue = Object.values(savedMeta).some(Boolean);
             if (!hasAnyValue) {
                 savedMeta = null;
@@ -1005,7 +1195,30 @@ document.addEventListener('DOMContentLoaded', () => {
             if (msg) {
                 msg.textContent = '✓ Tags will be embedded on download';
                 msg.classList.remove('hidden');
-                // Keep it visible so user knows tags are active — hide on next fetch
+            }
+        });
+
+        document.getElementById('metaApplyToAllBtn')?.addEventListener('click', () => {
+            savedMeta = {
+                title:  document.getElementById('metaTitle')?.value.trim()  || null,
+                artist: document.getElementById('metaArtist')?.value.trim() || null,
+                album:  document.getElementById('metaAlbum')?.value.trim()  || null,
+                year:   document.getElementById('metaYear')?.value.trim()   || null,
+                genre:  document.getElementById('metaGenre')?.value.trim()  || null,
+                track:  document.getElementById('metaTrack')?.value.trim()  || null,
+                applyToAll: true,
+            };
+
+            const hasAnyValue = Object.values(savedMeta).some(v => v !== 'applyToAll' ? Boolean(v) : false);
+            if (!hasAnyValue) {
+                savedMeta = null;
+                return;
+            }
+
+            const msg = document.getElementById('metaSavedMsg');
+            if (msg) {
+                msg.textContent = '✓ Tags will be applied to all playlist tracks';
+                msg.classList.remove('hidden');
             }
         });
 
@@ -1052,7 +1265,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (window.el && el.progressText) el.progressText.textContent = 'Ready';
     }
 
-    // ── PANEL: Batch Download ─────────────────────────────────────────────────
+    // 
     function initBatchPanel() {
         document.getElementById('batchStartBtn')?.addEventListener('click', startBatch);
     }
@@ -1170,7 +1383,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // ── Copy filename ─────────────────────────────────────────────────────────
+    // 
     async function copyFilename() {
         const text = el.filename.value;
         if (!text) return;
@@ -1193,7 +1406,7 @@ document.addEventListener('DOMContentLoaded', () => {
         el.progressHint.textContent = '';
     }
 
-    // ── Wire up everything ────────────────────────────────────────────────────
+    // 
     setupDropdown('formatDropdown',       'audioFormat');
     setupDropdown('qualityDropdown',      'audioQuality');
     setupDropdown('titleDropdown',        'titleFormat');
@@ -1228,7 +1441,7 @@ document.addEventListener('DOMContentLoaded', () => {
     updateHistoryBadge();
     initMobileNav();
 
-    // ── Mobile bottom nav ─────────────────────────────────────────────────────
+    // 
     function initMobileNav() {
         const NAV = [
             { btnId: 'mobileNavHome',    action: () => { closeAllPanels(); setActive('mobileNavHome'); window.scrollTo({top:0,behavior:'smooth'}); } },

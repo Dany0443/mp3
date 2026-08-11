@@ -566,6 +566,110 @@ input[type="text"]::placeholder {
   gap: 5px;
 }
 
+.playlist-tracks {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 12px;
+  max-height: 300px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.playlist-track {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  background: var(--surface2);
+  border-radius: var(--radius);
+  transition: var(--transition);
+}
+
+.playlist-track:hover {
+  background: var(--surface3);
+  border-color: var(--border2);
+}
+
+.playlist-track-num {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--text-3);
+  min-width: 30px;
+  text-align: center;
+}
+
+.playlist-track-thumb {
+  width: 48px;
+  height: 27px;
+  object-fit: cover;
+  border-radius: 6px;
+  background: var(--surface3);
+  flex-shrink: 0;
+}
+
+.playlist-track-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.playlist-track-title {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.playlist-track-artist {
+  font-size: 0.68rem;
+  color: var(--text-3);
+  margin-top: 2px;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.playlist-track-duration {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text-3);
+  flex-shrink: 0;
+}
+
+.playlist-track.status-pending {
+  opacity: 0.6;
+}
+.playlist-track.status-downloading {
+  border: 1px solid var(--cyan);
+  box-shadow: 0 0 0 1px rgba(var(--cyan), 0.1);
+}
+.playlist-track.status-success {
+  border: 1px solid var(--green);
+}
+.playlist-track.status-success::after {
+  content: '✓';
+  color: var(--green);
+  font-weight: bold;
+  margin-left: auto;
+  margin-right: 8px;
+}
+.playlist-track.status-failed {
+  border: 1px solid var(--red);
+  opacity: 0.7;
+}
+.playlist-track.status-failed::after {
+  content: '✗';
+  color: var(--red);
+  font-weight: bold;
+  margin-left: auto;
+  margin-right: 8px;
+}
+
 .video-meta {
   width: 100%;
 }

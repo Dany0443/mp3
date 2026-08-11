@@ -135,6 +135,7 @@
         <div class="panel-header">
             <div class="panel-title"><i class="fas fa-clock-rotate-left"></i> Download History</div>
             <div class="panel-header-actions">
+                <button class="panel-action-btn" id="exportHistoryBtn" title="Download all of your history"><i class="fa fa-arrow-circle-down" aria-hidden="true"></i></i></button>
                 <button class="panel-action-btn" id="clearHistoryBtn" title="Clear all history"><i class="fas fa-trash"></i></button>
                 <button class="panel-close" id="closeHistory"><i class="fas fa-xmark"></i></button>
             </div>
@@ -142,8 +143,9 @@
         <div class="panel-body">
             <div class="history-disclaimer">
                 <i class="fas fa-circle-info"></i>
-                History is saved only in this browser's local storage — nothing is sent to any server.
+                History is saved only in this browser's local storage, nothing is sent to any server.
             </div>
+            
             <div id="historyEmpty" class="panel-empty">
                 <i class="fas fa-clock-rotate-left"></i>
                 <p>No downloads yet</p>
@@ -207,6 +209,9 @@
             <div class="meta-actions">
                 <button class="meta-clear-btn" id="metaClearBtn"><i class="fas fa-rotate-left"></i> Reset</button>
                 <button class="meta-save-btn" id="metaSaveBtn"><i class="fas fa-check"></i> Apply Tags</button>
+            </div>
+            <div class="meta-actions" style="margin-top:10px;">
+                <button class="meta-save-btn" id="metaApplyToAllBtn" style="flex:1;"><i class="fas fa-list-check"></i> Apply to All</button>
             </div>
             <div id="metaSavedMsg" class="meta-saved-msg hidden"><i class="fas fa-check-circle"></i> Tags will be embedded on download</div>
         </div>
@@ -302,6 +307,8 @@
                         <h2 id="videoTitle">Video Title</h2>
                     </div>
                 </div>
+
+                <div id="playlistTracks" class="playlist-tracks hidden"></div>
 
                 <div class="options-section">
                     <div class="options-row">
