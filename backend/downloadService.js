@@ -27,6 +27,7 @@ const { stripEmojis, sanitizeFilename, extractVideoId, extractPlaylistId, canoni
 const { YT_DLP, CHILD_ENV, safeExecFile } = require('./execEnv');
 const { registerFile } = require('./fileRegistry');
 const { updateDownloadStatus } = require('./queue');
+const { ensureStorageSpace } = require('./cleanupWorker');
 
 const playlistCache = new Map();
 const PLAYLIST_CACHE_TTL = 15 * 60 * 1000;
@@ -337,6 +338,7 @@ async function fetchPlaylistInfo(rawUrl) {
 async function processYoutubeDownload(url, downloadId, audioFormat = 'mp3', quality = 192, outputFilename, isPreview = false, embedThumbnail = false, metaTags = null) {
     let finalOutputPath = null;
     try {
+        ensureStorageSpace(50 * 1024 * 1024);
         updateDownloadStatus(downloadId, { status: isPreview ? 'Generating preview...' : 'Initializing...', progress: 5 });
 
         const formatMap = { ogg: 'vorbis', m4a: 'aac' };
@@ -503,6 +505,7 @@ async function processPlaylistDownload(url, downloadId, audioFormat = 'mp3', qua
         if (total === 0) throw new Error('Playlist is empty or contains no accessible tracks.');
 
         const playlistTitle = sanitizeFilename(entries[0]?.playlist_title || entries[0]?.playlist || 'playlist');
+        ensureStorageSpace(Math.min(total * 12 * 1024 * 1024, 6 * 1024 * 1024 * 1024));
         fs.mkdirSync(tempDir, { recursive: true });
 
         const trackStatuses = entries.map((e, i) => ({
@@ -701,6 +704,7 @@ async function processBatchZip(urls, downloadId, audioFormat, quality) {
     const zipPath  = path.join(MP3_STORAGE_PATH, zipName);
 
     try {
+        ensureStorageSpace(Math.min(urls.length * 12 * 1024 * 1024, 6 * 1024 * 1024 * 1024));
         fs.mkdirSync(batchDir, { recursive: true });
         const total    = urls.length;
         let doneCount  = 0;

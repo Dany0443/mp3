@@ -16,6 +16,12 @@ const MAX_DOWNLOADS_PER_IP = parseInt(process.env.MAX_DOWNLOADS_PER_IP, 10) || 3
 const MAX_PLAYLIST_TRACKS = process.env.MAX_PLAYLIST_TRACKS !== undefined
     ? parseInt(process.env.MAX_PLAYLIST_TRACKS, 10)
     : 500;
+const MAX_STORAGE_GB = parseFloat(process.env.MAX_STORAGE_GB) || 15;
+const MAX_STORAGE_BYTES = Math.floor(MAX_STORAGE_GB * 1024 * 1024 * 1024);
+const CACHE_TTL_MS = parseInt(process.env.CACHE_TTL_HOURS, 10)
+    ? parseInt(process.env.CACHE_TTL_HOURS, 10) * 60 * 60 * 1000
+    : 24 * 60 * 60 * 1000; // 24 hours
+const STALE_TEMP_DIR_TTL_MS = 15 * 60 * 1000; // 15 mins for unfinished playlist temp dirs
 const BASE_PATH = (process.env.BASE_PATH || '').replace(/\/+$/, '');
 
 const COOKIES_FILE = (() => {
@@ -66,6 +72,10 @@ module.exports = {
     QUEUE_CONCURRENCY,
     MAX_DOWNLOADS_PER_IP,
     MAX_PLAYLIST_TRACKS,
+    MAX_STORAGE_GB,
+    MAX_STORAGE_BYTES,
+    CACHE_TTL_MS,
+    STALE_TEMP_DIR_TTL_MS,
     BASE_PATH,
     COOKIES_FILE,
     API_KEY_FILE,
