@@ -13,6 +13,9 @@ const TIME_WINDOW = parseInt(process.env.TIME_WINDOW, 10) || 60000; // 1 min
 const FILE_TTL_MS = 60 * 60 * 1000; // 1 hour
 const QUEUE_CONCURRENCY = parseInt(process.env.QUEUE_CONCURRENCY, 10) || 2;
 const MAX_DOWNLOADS_PER_IP = parseInt(process.env.MAX_DOWNLOADS_PER_IP, 10) || 3;
+const MAX_PLAYLIST_TRACKS = process.env.MAX_PLAYLIST_TRACKS !== undefined
+    ? parseInt(process.env.MAX_PLAYLIST_TRACKS, 10)
+    : 500;
 const BASE_PATH = (process.env.BASE_PATH || '').replace(/\/+$/, '');
 
 const COOKIES_FILE = (() => {
@@ -62,6 +65,7 @@ module.exports = {
     FILE_TTL_MS,
     QUEUE_CONCURRENCY,
     MAX_DOWNLOADS_PER_IP,
+    MAX_PLAYLIST_TRACKS,
     BASE_PATH,
     COOKIES_FILE,
     API_KEY_FILE,

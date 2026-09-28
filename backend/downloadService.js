@@ -2,7 +2,7 @@ const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
 const archiver = require('archiver');
-const { MP3_STORAGE_PATH, CACHE_DIR, FILE_TTL_MS, COOKIES_FILE, BASE_PATH } = require('./config');
+const { MP3_STORAGE_PATH, CACHE_DIR, FILE_TTL_MS, COOKIES_FILE, BASE_PATH, MAX_PLAYLIST_TRACKS } = require('./config');
 const logger = require('./logger');
 
 function createZipArchive(options = { zlib: { level: 0 } }) {
@@ -269,7 +269,7 @@ async function fetchPlaylistInfo(rawUrl) {
         '--no-warnings',
         '--socket-timeout', '15',
         '--retries', '2',
-        '--playlist-end', '300',
+        ...(MAX_PLAYLIST_TRACKS > 0 ? ['--playlist-end', String(MAX_PLAYLIST_TRACKS)] : []),
         '--flat-playlist',
         '--dump-json',
     ];
@@ -287,8 +287,8 @@ async function fetchPlaylistInfo(rawUrl) {
         try {
             const cmdArgs = [...baseArgs, ...strat.args, url];
             const { stdout } = await safeExecFile(YT_DLP, cmdArgs, {
-                maxBuffer: 25 * 1024 * 1024,
-                timeout: 90000,
+                maxBuffer: 50 * 1024 * 1024,
+                timeout: 120000,
             });
 
             const entries = stdout.trim().split('\n').map(line => {
