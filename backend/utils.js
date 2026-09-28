@@ -35,8 +35,8 @@ function sanitizeFilename(filename) {
 function cleanYoutubeUrl(url) {
     if (typeof url !== 'string') return null;
     try {
-        const u = new URL(url);
-        if (!/^(www\.)?(youtube\.com|youtu\.be|music\.youtube\.com)$/i.test(u.hostname)) return null;
+        const u = new URL(url.trim());
+        if (!/^(www\.|m\.)?(youtube\.com|youtu\.be|music\.youtube\.com)$/i.test(u.hostname)) return null;
         return u.href;
     } catch { return null; }
 }
@@ -44,23 +44,45 @@ function cleanYoutubeUrl(url) {
 function isValidYouTubeUrl(url) {
     if (typeof url !== 'string') return false;
     try {
-        const u = new URL(url);
-        return /^(www\.)?(youtube\.com|youtu\.be|music\.youtube\.com)$/i.test(u.hostname);
+        const u = new URL(url.trim());
+        return /^(www\.|m\.)?(youtube\.com|youtu\.be|music\.youtube\.com)$/i.test(u.hostname);
     } catch { return false; }
 }
 
 function extractVideoId(url) {
     try {
-        const u = new URL(url);
+        const u = new URL(url.trim());
         if (u.hostname.includes('youtu.be')) return u.pathname.slice(1).split('?')[0];
         return u.searchParams.get('v') || null;
     } catch { return null; }
 }
 
-function isPlaylistUrl(url) {
+function extractPlaylistId(url) {
+    if (typeof url !== 'string') return null;
     try {
-        const u = new URL(url);
-        return u.searchParams.has('list') && !u.searchParams.has('v');
+        const u = new URL(url.trim());
+        return u.searchParams.get('list') || null;
+    } catch {
+        const m = url.match(/[?&]list=([a-zA-Z0-9_-]+)/);
+        return m ? m[1] : null;
+    }
+}
+
+function canonicalizePlaylistUrl(url) {
+    const listId = extractPlaylistId(url);
+    if (!listId) return url;
+    return `https://www.youtube.com/playlist?list=${listId}`;
+}
+
+function isPlaylistUrl(url) {
+    if (typeof url !== 'string') return false;
+    try {
+        const u = new URL(url.trim());
+        const hasList = u.searchParams.has('list');
+        if (!hasList) return false;
+        if (u.pathname.includes('/playlist')) return true;
+        if (!u.searchParams.get('v') && !u.hostname.includes('youtu.be')) return true;
+        return false;
     } catch { return false; }
 }
 
@@ -132,6 +154,8 @@ module.exports = {
     cleanYoutubeUrl,
     isValidYouTubeUrl,
     extractVideoId,
+    extractPlaylistId,
+    canonicalizePlaylistUrl,
     isPlaylistUrl,
     getMimeType,
     httpGet,

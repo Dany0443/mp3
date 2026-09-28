@@ -16,8 +16,19 @@ const MAX_DOWNLOADS_PER_IP = parseInt(process.env.MAX_DOWNLOADS_PER_IP, 10) || 3
 const BASE_PATH = (process.env.BASE_PATH || '').replace(/\/+$/, '');
 
 const COOKIES_FILE = (() => {
-    const p = process.env.COOKIES_FILE || process.env.YT_COOKIES || '/home/homemc/ytcookie.txt';
-    try { return fs.existsSync(p) ? p : null; } catch { return null; }
+    const candidates = [
+        process.env.COOKIES_FILE,
+        process.env.YT_COOKIES,
+        path.join(ROOT_DIR, 'yt-cookies.txt'),
+        path.join(ROOT_DIR, 'cookies.txt'),
+        '/home/homemc/ytcookie.txt',
+    ].filter(Boolean);
+    for (const p of candidates) {
+        try {
+            if (fs.existsSync(p) && fs.statSync(p).size > 0) return p;
+        } catch {}
+    }
+    return null;
 })();
 
 const API_KEY_FILE = path.join(ROOT_DIR, '.apikey');

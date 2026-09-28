@@ -19,6 +19,7 @@ const {
     cleanYoutubeUrl,
     isValidYouTubeUrl,
     extractVideoId,
+    extractPlaylistId,
     isPlaylistUrl,
     getMimeType,
     stripEmojis
@@ -158,6 +159,7 @@ function registerRoutes(fastify) {
             }
 
             const info = await fetchVideoInfo(cleanUrl);
+            const playlistId = extractPlaylistId(cleanUrl);
             return reply.send({
                 isPlaylist:    false,
                 title:         info.title,
@@ -166,6 +168,7 @@ function registerRoutes(fastify) {
                 thumbnailUrl:  info.thumbnailUrl,
                 fromOembed:    info.fromOembed || false,
                 videoId:       extractVideoId(cleanUrl),
+                playlistId:    playlistId || undefined,
             });
         } catch (err) {
             logger.error('video-info failed:', err.message);

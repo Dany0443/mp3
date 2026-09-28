@@ -4,10 +4,32 @@ const { spawn } = require('child_process');
 const archiver = require('archiver');
 const { MP3_STORAGE_PATH, CACHE_DIR, FILE_TTL_MS, COOKIES_FILE, BASE_PATH } = require('./config');
 const logger = require('./logger');
-const { stripEmojis, sanitizeFilename, extractVideoId, httpGet, httpGetText } = require('./utils');
+
+function createZipArchive(options = { zlib: { level: 0 } }) {
+    if (typeof archiver === 'function') {
+        return archiver('zip', options);
+    }
+    if (archiver && typeof archiver.create === 'function') {
+        return archiver.create('zip', options);
+    }
+    if (archiver && typeof archiver.ZipArchive === 'function') {
+        return new archiver.ZipArchive(options);
+    }
+    if (archiver && typeof archiver.default === 'function') {
+        return archiver.default('zip', options);
+    }
+    if (archiver && archiver.default && typeof archiver.default.create === 'function') {
+        return archiver.default.create('zip', options);
+    }
+    throw new Error('Unsupported archiver module format');
+}
+const { stripEmojis, sanitizeFilename, extractVideoId, extractPlaylistId, canonicalizePlaylistUrl, httpGet, httpGetText } = require('./utils');
 const { YT_DLP, CHILD_ENV, safeExecFile } = require('./execEnv');
 const { registerFile } = require('./fileRegistry');
 const { updateDownloadStatus } = require('./queue');
+
+const playlistCache = new Map();
+const PLAYLIST_CACHE_TTL = 15 * 60 * 1000;
 
 const DOWNLOAD_STRATEGIES = [
     { name: 'default', extraArgs: ['--extractor-args', 'youtube:player_client=default,-android_sdkless', '--remote-components', 'ejs:github'], formatArg: 'ba' },
@@ -230,26 +252,86 @@ async function fetchVideoInfo(url) {
     throw new Error('All strategies failed to fetch video info');
 }
 
-async function fetchPlaylistInfo(url) {
-    for (const strategy of DOWNLOAD_STRATEGIES) {
+async function fetchPlaylistInfo(rawUrl) {
+    const playlistId = extractPlaylistId(rawUrl);
+    const url = canonicalizePlaylistUrl(rawUrl);
+
+    if (playlistId && playlistCache.has(playlistId)) {
+        const cached = playlistCache.get(playlistId);
+        if (cached && cached.expiresAt > Date.now() && cached.entries?.length > 0) {
+            logger.info(`Playlist cache hit: ${playlistId} (${cached.entries.length} tracks)`);
+            return cached.entries;
+        }
+    }
+
+    const baseArgs = [
+        '--no-check-certificate',
+        '--no-warnings',
+        '--socket-timeout', '15',
+        '--retries', '2',
+        '--playlist-end', '300',
+        '--flat-playlist',
+        '--dump-json',
+    ];
+
+    const strategies = [
+        ...(COOKIES_FILE ? [{ name: 'cookies', args: ['--cookies', COOKIES_FILE] }] : []),
+        { name: 'direct', args: [] },
+        { name: 'mweb',   args: ['--extractor-args', 'youtube:player_client=mweb'] },
+        { name: 'ios',    args: ['--extractor-args', 'youtube:player_client=ios'] },
+    ];
+
+    let lastErrorMsg = 'All strategies failed to fetch playlist info';
+
+    for (const strat of strategies) {
         try {
-            const args = [
-                ...strategy.extraArgs,
-                ...sharedArgs(true),
-                '--dump-json',
-                '--flat-playlist',
-                url,
-            ];
-            const { stdout } = await safeExecFile(YT_DLP, args, { maxBuffer: 20 * 1024 * 1024, timeout: 60000 });
+            const cmdArgs = [...baseArgs, ...strat.args, url];
+            const { stdout } = await safeExecFile(YT_DLP, cmdArgs, {
+                maxBuffer: 25 * 1024 * 1024,
+                timeout: 90000,
+            });
+
             const entries = stdout.trim().split('\n').map(line => {
                 try { return JSON.parse(line); } catch { return null; }
             }).filter(Boolean);
-            return entries;
+
+            if (entries.length > 0) {
+                if (playlistId) {
+                    if (playlistCache.size >= 100) playlistCache.delete(playlistCache.keys().next().value);
+                    playlistCache.set(playlistId, {
+                        entries,
+                        expiresAt: Date.now() + PLAYLIST_CACHE_TTL,
+                    });
+                }
+                logger.info(`Playlist info fetched via ${strat.name}: ${entries.length} tracks`);
+                return entries;
+            }
         } catch (err) {
-            logger.warn(`Playlist info strategy "${strategy.name}" failed: ${err.message.slice(0, 150)}`);
+            const stderr = err.stderr || err.message || '';
+            logger.warn(`Playlist info strategy "${strat.name}" failed: ${stderr.slice(0, 150)}`);
+
+            if (stderr.includes('The playlist does not exist')) {
+                lastErrorMsg = 'The playlist does not exist or has been removed.';
+            } else if (stderr.includes('This playlist is private') || stderr.includes('Private playlist')) {
+                lastErrorMsg = 'This playlist is private. Check your yt-cookies.txt or playlist permissions.';
+            } else if (stderr.includes('Sign in') || stderr.includes('confirm you’re not a bot') || stderr.includes('Sign-in')) {
+                lastErrorMsg = 'YouTube requires authentication or bot verification to view this playlist.';
+            } else if (stderr.includes('HTTP Error 400')) {
+                lastErrorMsg = 'Invalid playlist URL or request contains an invalid argument.';
+            } else if (stderr.includes('HTTP Error 404')) {
+                lastErrorMsg = 'Playlist not found on YouTube (HTTP 404).';
+            } else if (stderr.includes('timed out')) {
+                lastErrorMsg = 'Playlist request timed out. Please try again.';
+            } else {
+                const lines = stderr.trim().split('\n').filter(l => l.includes('ERROR:'));
+                if (lines.length > 0) {
+                    lastErrorMsg = lines.pop().replace(/ERROR:\s*\[[^\]]+\]\s*/i, '').trim();
+                }
+            }
         }
     }
-    throw new Error('All strategies failed to fetch playlist info');
+
+    throw new Error(lastErrorMsg);
 }
 
 async function processYoutubeDownload(url, downloadId, audioFormat = 'mp3', quality = 192, outputFilename, isPreview = false, embedThumbnail = false, metaTags = null) {
@@ -401,23 +483,33 @@ async function processPlaylistDownload(url, downloadId, audioFormat = 'mp3', qua
     const formatMap = { ogg: 'vorbis', m4a: 'aac' };
     const conversionFormat = formatMap[audioFormat] || audioFormat;
     const qualityArg = buildQualityArg(audioFormat, quality);
+    const usePipe = (audioFormat === 'mp3' || audioFormat === 'wav') && !embedThumbnail;
 
     let zipPath = null;
+    const tempDir = path.join(MP3_STORAGE_PATH, `playlist_${downloadId}`);
+
     try {
         updateDownloadStatus(downloadId, { status: 'Fetching playlist info...', progress: 3, isPlaylist: true });
 
-        const entries = await fetchPlaylistInfo(url);
+        const rawEntries = await fetchPlaylistInfo(url);
+        const entries = rawEntries.filter(e => {
+            const title = (e.title || '').trim().toLowerCase();
+            if (!e.id && !e.url && !e.webpage_url) return false;
+            if (title === '[deleted video]' || title === '[private video]') return false;
+            return true;
+        });
+
         const total = entries.length;
-        if (total === 0) throw new Error('Playlist is empty or unavailable.');
+        if (total === 0) throw new Error('Playlist is empty or contains no accessible tracks.');
 
         const playlistTitle = sanitizeFilename(entries[0]?.playlist_title || entries[0]?.playlist || 'playlist');
-        const tempDir = path.join(MP3_STORAGE_PATH, `playlist_${downloadId}`);
         fs.mkdirSync(tempDir, { recursive: true });
 
         const trackStatuses = entries.map((e, i) => ({
             index: i,
             id: e.id,
-            title: stripEmojis(e.title || `Track ${i+1}`),
+            title: stripEmojis(e.title || `Track ${i + 1}`),
+            uploader: stripEmojis(e.uploader || e.channel || ''),
             status: 'pending'
         }));
 
@@ -426,76 +518,125 @@ async function processPlaylistDownload(url, downloadId, audioFormat = 'mp3', qua
             progress: 5,
             total,
             done: 0,
+            failed: 0,
             trackStatuses
         });
 
         let doneCount = 0;
         let failedCount = 0;
+        let activeCount = 0;
+        const PLAYLIST_CONCURRENCY = 4;
 
-        for (let i = 0; i < entries.length; i++) {
-            const entry = entries[i];
-            const videoUrl = entry.url || entry.webpage_url || `https://www.youtube.com/watch?v=${entry.id}`;
-            const trackName = sanitizeFilename(entry.title || `track_${i + 1}`);
-            const outPattern = path.join(tempDir, `${String(i + 1).padStart(3, '0')}_${trackName}.%(ext)s`);
+        const updatePlaylistOverallStatus = (currentTrackName = '') => {
+            const completed = doneCount + failedCount;
+            const overallProgress = Math.min(95, Math.floor(5 + (completed / total) * 88));
+            const activeMsg = activeCount > 1 ? ` (${activeCount} active in parallel)` : '';
+            const status = currentTrackName
+                ? `[${completed + 1}/${total}] ${currentTrackName}${activeMsg}`
+                : `Downloading playlist: ${doneCount}/${total} done${activeMsg}`;
 
-            trackStatuses[i].status = 'downloading';
             updateDownloadStatus(downloadId, {
-                status: `[${i+1}/${total}] ${trackName}`,
-                progress: 5 + Math.floor((i / total) * 88),
+                status,
+                progress: overallProgress,
                 done: doneCount,
-                total,
                 failed: failedCount,
+                total,
+                isPlaylist: true,
                 trackStatuses
             });
+        };
 
+        const trackTasks = entries.map((entry, i) => async () => {
+            const videoUrl = entry.url || entry.webpage_url || `https://www.youtube.com/watch?v=${entry.id}`;
+            const trackName = sanitizeFilename(stripEmojis(entry.title || `track_${i + 1}`));
             const artistName = stripEmojis(entry.uploader || entry.channel || playlistTitle);
-            const trackTags = {
-                title:  metaTags?.title ?? trackName,
-                artist: metaTags?.artist ?? artistName,
-                album:  metaTags?.album ?? playlistTitle,
-                track:  metaTags?.track ?? `${i + 1}/${total}`,
-                year:   metaTags?.year ?? null,
-                genre:  metaTags?.genre ?? null,
-            };
-            const trackTagArgs = buildTagPostprocessorArgs(trackTags);
+
+            trackStatuses[i].status = 'downloading';
+            activeCount++;
+            updatePlaylistOverallStatus(trackName);
 
             let trackSucceeded = false;
-            for (const strategy of DOWNLOAD_STRATEGIES) {
-                const args = [
-                    ...strategy.extraArgs,
-                    ...sharedArgs(),
-                    '-f', 'bestaudio/best',
-                    '--extract-audio',
-                    '--audio-format', conversionFormat,
-                    '--audio-quality', qualityArg,
-                    '--newline',
-                    ...(embedThumbnail ? ['--embed-thumbnail', '--convert-thumbnails', 'jpg'] : []),
-                    ...trackTagArgs,
-                    '-o', outPattern,
-                    videoUrl,
-                ];
-                try {
-                    logger.info(`[${downloadId}] Track ${i+1}: trying ${strategy.name}`);
-                    await spawnYtdlp(args, null);
-                    trackSucceeded = true;
-                    break;
-                } catch (err) {
-                    logger.warn(`[${downloadId}] Track ${i+1} strategy ${strategy.name} failed: ${err.message}`);
+
+            if (usePipe) {
+                const metaParts = [];
+                const finalTitle = metaTags?.title || entry.title || trackName;
+                const finalArtist = metaTags?.artist || artistName;
+                if (finalTitle) metaParts.push('-metadata', `title=${finalTitle}`);
+                if (finalArtist) metaParts.push('-metadata', `artist=${finalArtist}`);
+                metaParts.push('-metadata', `album=${playlistTitle}`);
+                metaParts.push('-metadata', `track=${i + 1}/${total}`);
+
+                const ffmpegAudioArgs = audioFormat === 'mp3'
+                    ? ['-map_metadata', '-1', '-id3v2_version', '3', '-c:a', 'libmp3lame', '-b:a', `${quality}k`, ...metaParts]
+                    : ['-map_metadata', '-1', '-id3v2_version', '3', '-c:a', 'pcm_s16le', ...metaParts];
+
+                const pipeDest = path.join(tempDir, `${String(i + 1).padStart(3, '0')}_${trackName}.${audioFormat}`);
+
+                for (const strategy of DOWNLOAD_STRATEGIES) {
+                    try {
+                        if (fs.existsSync(pipeDest)) fs.unlinkSync(pipeDest);
+                        await downloadAndEncodePiped(videoUrl, strategy, pipeDest, ffmpegAudioArgs, false, null);
+                        trackSucceeded = true;
+                        break;
+                    } catch (err) {
+                        logger.warn(`[${downloadId}] Track ${i + 1} pipe "${strategy.name}" failed: ${err.message.slice(0, 120)}`);
+                        if (fs.existsSync(pipeDest)) try { fs.unlinkSync(pipeDest); } catch {}
+                    }
                 }
             }
 
+            if (!trackSucceeded) {
+                const outPattern = path.join(tempDir, `${String(i + 1).padStart(3, '0')}_${trackName}.%(ext)s`);
+                for (const strategy of DOWNLOAD_STRATEGIES) {
+                    const args = [
+                        ...strategy.extraArgs,
+                        ...sharedArgs(),
+                        '-f', strategy.formatArg || 'ba/bestaudio/best',
+                        '--extract-audio',
+                        '--audio-format', conversionFormat,
+                        '--audio-quality', qualityArg,
+                        '--newline',
+                        ...(embedThumbnail ? ['--embed-thumbnail', '--convert-thumbnails', 'jpg'] : []),
+                        '-o', outPattern,
+                        videoUrl,
+                    ];
+                    try {
+                        logger.info(`[${downloadId}] Track ${i + 1}: trying direct ${strategy.name}`);
+                        await spawnYtdlp(args, null);
+                        trackSucceeded = true;
+                        break;
+                    } catch (err) {
+                        logger.warn(`[${downloadId}] Track ${i + 1} direct strategy "${strategy.name}" failed: ${err.message.slice(0, 120)}`);
+                    }
+                }
+            }
+
+            activeCount--;
             if (trackSucceeded) {
                 trackStatuses[i].status = 'success';
                 doneCount++;
-                logger.success(`[${downloadId}] Track ${i+1} succeeded: ${trackName}`);
+                logger.success(`[${downloadId}] Track ${i + 1} succeeded: ${trackName}`);
             } else {
                 trackStatuses[i].status = 'failed';
                 failedCount++;
-                logger.warn(`[${downloadId}] Playlist track ${i+1} failed, skipping: ${videoUrl}`);
+                logger.warn(`[${downloadId}] Track ${i + 1} failed: ${videoUrl}`);
             }
-        }
 
-        updateDownloadStatus(downloadId, { status: 'Creating zip...', progress: 95, trackStatuses, done: doneCount, failed: failedCount });
+            updatePlaylistOverallStatus();
+        });
+
+        async function runPool(tasks, concurrency) {
+            const iter = tasks[Symbol.iterator]();
+            const workers = Array.from({ length: concurrency }, async () => {
+                for (let item = iter.next(); !item.done; item = iter.next()) {
+                    await item.value();
+                }
+            });
+            await Promise.all(workers);
+        }
+        await runPool(trackTasks, PLAYLIST_CONCURRENCY);
+
+        updateDownloadStatus(downloadId, { status: 'Creating zip...', progress: 95, trackStatuses, done: doneCount, failed: failedCount, total });
 
         const zipName = `${playlistTitle}.zip`;
         zipPath = path.join(MP3_STORAGE_PATH, zipName);
@@ -503,11 +644,11 @@ async function processPlaylistDownload(url, downloadId, audioFormat = 'mp3', qua
         const audioFiles = fs.readdirSync(tempDir)
             .filter(f => /\.(mp3|m4a|ogg|wav|opus)$/i.test(f))
             .sort();
-        if (audioFiles.length === 0) throw new Error('No tracks were downloaded successfully');
+        if (audioFiles.length === 0) throw new Error('No tracks were downloaded successfully.');
 
         await new Promise((resolve, reject) => {
             const output  = fs.createWriteStream(zipPath);
-            const archive = archiver('zip', { zlib: { level: 0 } });
+            const archive = createZipArchive({ zlib: { level: 0 } });
             output.on('close', resolve);
             archive.on('error', reject);
             archive.pipe(output);
@@ -523,10 +664,10 @@ async function processPlaylistDownload(url, downloadId, audioFormat = 'mp3', qua
         if (stat.size === 0) throw new Error('Zip file is empty.');
 
         registerFile(zipPath);
-        logger.success(`Playlist ready: ${zipName} (${(stat.size / 1048576).toFixed(2)} MB) — expires in 1h`);
+        logger.success(`Playlist ready: ${zipName} (${(stat.size / 1048576).toFixed(2)} MB) — ${doneCount}/${total} tracks`);
 
         updateDownloadStatus(downloadId, {
-            status: 'Playlist ready!',
+            status: `Playlist ready! (${doneCount}/${total} tracks)`,
             progress: 100,
             complete: true,
             downloadUrl: `${BASE_PATH}/downloads/${encodeURIComponent(zipName)}`,
@@ -543,7 +684,6 @@ async function processPlaylistDownload(url, downloadId, audioFormat = 'mp3', qua
         logger.error(`Playlist download failed [${downloadId}]: ${err.message}`);
         updateDownloadStatus(downloadId, { error: true, status: `Failed: ${err.message}`, complete: true });
         try {
-            const tempDir = path.join(MP3_STORAGE_PATH, `playlist_${downloadId}`);
             fs.rmSync(tempDir, { recursive: true, force: true });
         } catch {}
         if (zipPath && fs.existsSync(zipPath)) try { fs.unlinkSync(zipPath); } catch {}
@@ -656,7 +796,7 @@ async function processBatchZip(urls, downloadId, audioFormat, quality) {
 
         await new Promise((resolve, reject) => {
             const output  = fs.createWriteStream(zipPath);
-            const archive = archiver('zip', { zlib: { level: 0 } });
+            const archive = createZipArchive({ zlib: { level: 0 } });
             output.on('close', resolve);
             archive.on('error', reject);
             archive.pipe(output);
@@ -698,6 +838,7 @@ module.exports = {
     DOWNLOAD_STRATEGIES,
     oembedCache,
     durationCache,
+    playlistCache,
     fetchVideoInfo,
     fetchPlaylistInfo,
     processYoutubeDownload,

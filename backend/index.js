@@ -14,7 +14,7 @@ const logger = require('./logger');
 const { checkDependencies, startYtDlpAutoUpdate } = require('./execEnv');
 const { loadRegistry } = require('./fileRegistry');
 const { startCleanupSweep } = require('./cleanupWorker');
-const { oembedCache } = require('./downloadService');
+const { oembedCache, playlistCache } = require('./downloadService');
 const { registerRoutes } = require('./routes');
 
 const fastify = Fastify({
@@ -41,7 +41,7 @@ async function start() {
     loadOrCreateApiKey(logger);
     loadRegistry();
     await checkDependencies(COOKIES_FILE);
-    startCleanupSweep(oembedCache);
+    startCleanupSweep(oembedCache, playlistCache);
     startYtDlpAutoUpdate();
 
     try {

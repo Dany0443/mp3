@@ -228,7 +228,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (playlistTracksEl && data.entries) {
                     playlistTracksEl.classList.remove('hidden');
                     playlistTracksEl.innerHTML = data.entries.map((entry, idx) => `
-                        <div class="playlist-track">
+                        <div class="playlist-track status-pending" data-track-index="${idx}">
                             <div class="playlist-track-num">${idx + 1}</div>
                             <img src="${escHtml(entry.thumbnailUrl)}" class="playlist-track-thumb" alt="" onerror="this.style.display='none'">
                             <div class="playlist-track-info">
@@ -256,6 +256,34 @@ document.addEventListener('DOMContentLoaded', () => {
                 } else {
                     el.duration.textContent = formatTime(data.lengthSeconds);
                 }
+            }
+
+            // Playlist notice for single video links containing a playlist ID
+            let playlistNotice = document.getElementById('playlistNotice');
+            if (!data.isPlaylist && data.playlistId) {
+                if (!playlistNotice) {
+                    playlistNotice = document.createElement('div');
+                    playlistNotice.id = 'playlistNotice';
+                    playlistNotice.className = 'playlist-notice-banner';
+                    el.infoSection.insertBefore(playlistNotice, el.infoSection.firstChild);
+                }
+                playlistNotice.innerHTML = `
+                    <div class="playlist-notice-content">
+                        <i class="fas fa-list"></i>
+                        <span>This video is part of a playlist.</span>
+                        <button type="button" class="playlist-notice-btn" id="fetchPlaylistBtn">Fetch Entire Playlist</button>
+                    </div>
+                `;
+                playlistNotice.classList.remove('hidden');
+                const btn = document.getElementById('fetchPlaylistBtn');
+                if (btn) {
+                    btn.onclick = () => {
+                        el.urlInput.value = `https://www.youtube.com/playlist?list=${data.playlistId}`;
+                        fetchVideoInfo();
+                    };
+                }
+            } else if (playlistNotice) {
+                playlistNotice.classList.add('hidden');
             }
 
             el.infoSection.classList.remove('hidden');
@@ -441,7 +469,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         stopFfmpegRamp();
 
-        if (!isCached) {
+        if (!isCached && !currentVideo?.isPlaylist) {
             startFakeRamp();
         }
 
@@ -452,52 +480,56 @@ document.addEventListener('DOMContentLoaded', () => {
             let data;
             try { data = JSON.parse(e.data); } catch { return; }
 
-            if (data.status && data.status !== 'Queued') {
-                if (!ffmpegRampInterval) el.statusMsg.textContent = data.status;
-            }
-
-            if (typeof data.progress === 'number' && data.progress > 5 && data.progress < 100) {
+            if (data.isPlaylist) {
                 stopFakeRamp();
+                stopFfmpegRamp();
 
-                if (data.progress >= 90) {
-                    if (!ffmpegRampInterval) {
-                        let currentProg = 90;
-                        ffmpegRampInterval = setInterval(() => {
-                            currentProg = Math.min(currentProg + 0.34, 99.5);
-                            el.progressBar.style.width = currentProg.toFixed(1) + '%';
-                            el.progressText.textContent = Math.floor(currentProg) + '%';
-                            if (el.statusMsg) el.statusMsg.textContent = 'Converting...';
-                        }, 250);
+                if (data.status) {
+                    el.statusMsg.textContent = data.status;
+                }
+
+                if (data.total) {
+                    const completed = (data.done || 0) + (data.failed || 0);
+                    const pct = Math.min(99, Math.round((completed / data.total) * 100));
+                    el.progressBar.style.width  = Math.max(pct, data.progress || 0) + '%';
+                    el.progressText.textContent = `${data.done || 0}/${data.total} (${pct}%)`;
+                    if (el.progressHint) {
+                        el.progressHint.textContent = `Tracks: ${data.done || 0} / ${data.total} done${data.failed ? ` (${data.failed} failed)` : ''}`;
                     }
-                } else {
-                    el.progressBar.style.width  = data.progress + '%';
-                    el.progressText.textContent = Math.round(data.progress) + '%';
                 }
-            }
 
-            if (data.speed || data.eta) {
-                if (el.etaRow) el.etaRow.classList.remove('hidden');
-                const parts = [];
-                if (data.speed) parts.push(data.speed);
-                if (data.eta)   parts.push(`ETA ${data.eta}`);
-                if (el.etaText && !ffmpegRampInterval) el.etaText.textContent = parts.join(' · ');
-                if (ffmpegRampInterval && el.etaRow) el.etaRow.classList.add('hidden');
-            }
-
-            if (data.status === 'Queued' || data.queuePosition) {
-                const pos = data.queuePosition;
-                const len = data.queueLength;
-                if (el.progressHint) {
-                    // Only show position when genuinely waiting behind other jobs.
-                    // pos > 1 means there's at least one job ahead — if you're the
-                    // only one queued and slots are free you're already downloading.
-                    el.progressHint.textContent = (pos && pos > 1)
-                        ? `Waiting in queue — position ${pos} of ${len}`
-                        : 'Waiting in queue...';
+                if (data.trackStatuses && Array.isArray(data.trackStatuses)) {
+                    data.trackStatuses.forEach(ts => {
+                        const trackEl = document.querySelector(`.playlist-track[data-track-index="${ts.index}"]`);
+                        if (trackEl && ts.status) {
+                            trackEl.classList.remove('status-pending', 'status-downloading', 'status-success', 'status-failed');
+                            trackEl.classList.add(`status-${ts.status}`);
+                        }
+                    });
                 }
-            }
-            if (data.isPlaylist && data.total) {
-                if (el.progressHint) el.progressHint.textContent = `Tracks: ${data.done || 0} / ${data.total} done`;
+            } else {
+                if (data.status && data.status !== 'Queued') {
+                    if (!ffmpegRampInterval) el.statusMsg.textContent = data.status;
+                }
+
+                if (typeof data.progress === 'number' && data.progress > 5 && data.progress < 100) {
+                    stopFakeRamp();
+
+                    if (data.progress >= 90) {
+                        if (!ffmpegRampInterval) {
+                            let currentProg = 90;
+                            ffmpegRampInterval = setInterval(() => {
+                                currentProg = Math.min(currentProg + 0.34, 99.5);
+                                el.progressBar.style.width = currentProg.toFixed(1) + '%';
+                                el.progressText.textContent = Math.floor(currentProg) + '%';
+                                if (el.statusMsg) el.statusMsg.textContent = 'Converting...';
+                            }, 250);
+                        }
+                    } else {
+                        el.progressBar.style.width  = data.progress + '%';
+                        el.progressText.textContent = Math.round(data.progress) + '%';
+                    }
+                }
             }
 
             if (data.error) {

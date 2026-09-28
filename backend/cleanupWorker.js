@@ -4,7 +4,7 @@ const { MP3_STORAGE_PATH, FILE_TTL_MS } = require('./config');
 const { fileRegistry, saveRegistry } = require('./fileRegistry');
 const logger = require('./logger');
 
-function startCleanupSweep(oembedCacheRef) {
+function startCleanupSweep(oembedCacheRef, playlistCacheRef) {
     function sweep() {
         const now = Date.now();
         let changed = false;
@@ -69,6 +69,13 @@ function startCleanupSweep(oembedCacheRef) {
         if (oembedCacheRef && oembedCacheRef instanceof Map) {
             for (const [k, v] of oembedCacheRef) {
                 if (v.expiresAt < now) oembedCacheRef.delete(k);
+            }
+        }
+
+        // Evict expired playlist cache entries
+        if (playlistCacheRef && playlistCacheRef instanceof Map) {
+            for (const [k, v] of playlistCacheRef) {
+                if (v.expiresAt < now) playlistCacheRef.delete(k);
             }
         }
     }

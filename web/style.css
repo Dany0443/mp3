@@ -670,6 +670,40 @@ input[type="text"]::placeholder {
   margin-right: 8px;
 }
 
+.playlist-notice-banner {
+  background: rgba(37, 99, 235, 0.08);
+  border: 1px solid rgba(37, 99, 235, 0.25);
+  border-radius: var(--radius-sm, 10px);
+  padding: 10px 14px;
+  margin-bottom: 14px;
+}
+.playlist-notice-content {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.85rem;
+  color: var(--text-2);
+}
+.playlist-notice-content i {
+  color: var(--blue);
+}
+.playlist-notice-btn {
+  margin-left: auto;
+  background: var(--blue);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-xs, 6px);
+  padding: 5px 12px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.2s, transform 0.1s;
+}
+.playlist-notice-btn:hover {
+  opacity: 0.9;
+  transform: translateY(-1px);
+}
+
 .video-meta {
   width: 100%;
 }
